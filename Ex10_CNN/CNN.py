@@ -27,7 +27,7 @@ def img2col(X:np.ndarray, filter_size:int, filter_c:int, stride:int = 1, padding
         X_paded = X
 
     new_shape = (N,h_out,w_out,filter_c,filter_size,filter_size)
-    print(new_shape)
+    # print(new_shape)
     new_strides = (s_n, # N
                    s_h*stride, # h_out
                    s_w*stride, # w_out
