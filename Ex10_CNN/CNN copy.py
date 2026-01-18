@@ -1,6 +1,5 @@
 import numpy as np
 import os
-import pickle
 from numpy.lib.stride_tricks import as_strided
 import matplotlib.pyplot as plt
 
@@ -34,6 +33,7 @@ def img2col(X:np.ndarray, filter_size:int, filter_c:int, stride:int = 1, padding
     
     X_col = as_strided(X_padded, shape=new_shape, strides=new_strides)
     return X_col
+
 
 
 
@@ -81,7 +81,7 @@ def col2img(X_col:np.ndarray, stride:int=1, padding:tuple=(0,0))->np.ndarray:
         return X_padded
 
 class layer:
-    def forward_prop(self,X:np.ndarray, training:bool=True)->np.ndarray:
+    def forward_prop(self,X:np.ndarray)->np.ndarray:
         pass
     def backward_prop(self,dY:np.ndarray)->np.ndarray:
         pass
@@ -140,7 +140,7 @@ class Conv(layer):
         if epsilon is not None:
             self.epsilon = epsilon
 
-    def forward_prop(self, X:np.ndarray, training:bool=True)->np.ndarray:
+    def forward_prop(self, X:np.ndarray)->np.ndarray:
         ''' 
         X: (N, X_C^{l-1}, X_H^{l-1}, X_W^{l-1})
         F: (f_c^{l}*f_size^{l}*f_size^{l})
@@ -253,7 +253,7 @@ class BatchNorm(layer):
             self.Adam_beta2 = beta2
         if epsilon is not None:
             self.epsilon = epsilon
-    def forward_prop(self, Z:np.ndarray, training:bool=True)->np.ndarray:
+    def forward_prop(self, Z:np.ndarray)->np.ndarray:
         # Z should be (N, ...)
         
         if self.input_shape is None:
@@ -331,7 +331,7 @@ class Activation(layer):
                        1 / (1 + np.exp(-X)),
                        np.exp(X) / (1 + np.exp(X)))
         # return 1 / (1 + np.exp(-X))
-    def forward_prop(self, Z:np.ndarray, training:bool=True)->np.ndarray:
+    def forward_prop(self, Z:np.ndarray)->np.ndarray:
         """
         Z: (N, ...)
         """
@@ -429,7 +429,7 @@ class Pooling(layer):# check
         self.Adam_beta1 = beta1
         self.Adam_beta2 = beta2
         self.epsilon = epsilon
-    def forward_prop(self,A:np.ndarray, training:bool=True)->np.ndarray:
+    def forward_prop(self,A:np.ndarray)->np.ndarray:
         """
         A: (N, f_n, Z_H, Z_W) - Channels first
         Returns: (N, f_n, h_out, w_out) - Channels first
@@ -570,7 +570,7 @@ class FC(layer): # fully connected layer
         if epsilon is not None:
             self.epsilon = epsilon
 
-    def forward_prop(self,A:np.ndarray, training:bool=True)->np.ndarray:
+    def forward_prop(self,A:np.ndarray)->np.ndarray:
         """
         A: Can be (N, H, W, C) from conv/pool layers or (N, D_out_prev) from FC layers
         W: (D_in, D_out)
@@ -637,27 +637,6 @@ class FC(layer): # fully connected layer
         return d_A
 
 
-class Dropout(layer):
-    def __init__(self, drop_rate=0.5):
-        self.drop_rate = drop_rate
-        self.mask = None
-    
-    def forward_prop(self, A:np.ndarray, training:bool=True)->np.ndarray:
-        if training:
-            # Inverted dropout: Scale by 1/(1-p) so expected sum remains same
-            keep_prob = 1 - self.drop_rate
-            self.mask = (np.random.rand(*A.shape) < keep_prob) / keep_prob # *是解包运算符，把元组（2，2）解为2，2
-            # / keep_prob缩放是为了保持数学期望值不变
-
-            # self.mask = (np.random.rand(*A.shape) < keep_prob) # *是解包运算符，把元组（2，2）解为2，2
-            return A * self.mask
-        else:
-            return A
-            
-    def backward_prop(self, dZ:np.ndarray)->np.ndarray:
-        return dZ * self.mask
-
-
 class CNN:
     def __init__(self,layers:list[layer],
                 learning_rate:float=0.001,
@@ -674,29 +653,16 @@ class CNN:
         self.epsilon = epsilon
 
         self.cost_history = []
-        self.epoch_start = 0
     
-    def save(self, filename):
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        with open(filename, 'wb') as f:
-            pickle.dump(self, f)
-        print(f"Model saved to {filename}")
-
-    @staticmethod
-    def load(filename):
-        with open(filename, 'rb') as f:
-            return pickle.load(f)
-
     def unified_hyperparam(self, learn_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
         for layer in self.layers:
             layer.modified_hyperparam(learn_rate, _Adam, beta1, beta2, epsilon)
         
-    def forward(self,X:np.ndarray,Y:np.ndarray=None, training:bool=True)->np.ndarray:
+    def forward(self,X:np.ndarray,Y:np.ndarray=None)->np.ndarray:
         self.forward_params = [X]  # Reset forward params for each forward pass
         for i, layer in enumerate(self.layers):
-            out = layer.forward_prop(self.forward_params[-1], training=training)
+            out = layer.forward_prop(self.forward_params[-1])
             # if out.shape[0] != X.shape[0]: print(f"Shape mismatch at layer {i} {type(layer).__name__}: {out.shape} vs input {X.shape}", flush=True)
             self.forward_params.append(out)
         return self.forward_params[-1]
@@ -729,106 +695,92 @@ class CNN:
             result = self.layers[i].backward_prop(dY)
             dY = result
     
-    def train(self,X:np.ndarray,Y:np.ndarray,epochs:int=1000,batch_size:int=128,tolerance:float=1e-12,print_cost:bool=True, save_path:str=None):
+    def train(self,X:np.ndarray,Y:np.ndarray,epochs:int=1000,batch_size:int=128,tolerance:float=1e-12,print_cost:bool=True):
         N = X.shape[0]
         num_batches = N // batch_size + 1  # Ceiling division
 
         print(f"Training with {N} samples, batch_size={batch_size}, num_batches={num_batches}")
 
-        try:
-            for i in range(self.epoch_start, self.epoch_start + epochs):
-                # Shuffle data at the beginning of each epoch
-                indices = np.random.permutation(N)
-                X_shuffled = X[indices]
-                Y_shuffled = Y[indices]
+        for i in range(epochs):
+            # Shuffle data at the beginning of each epoch
+            indices = np.random.permutation(N)
+            X_shuffled = X[indices]
+            Y_shuffled = Y[indices]
 
-                epoch_cost = 0
+            epoch_cost = 0
 
 
-                # Process in batches
-                for batch_idx in range(num_batches):
-                    # print(f"Starting Batch {batch_idx+1}/{num_batches}", flush=True) # DEBUG
-                    start_idx = batch_idx * batch_size
-                    end_idx = min(start_idx + batch_size, N)
+            # Process in batches
+            for batch_idx in range(num_batches):
+                # print(f"Starting Batch {batch_idx+1}/{num_batches}", flush=True) # DEBUG
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, N)
 
-                    X_batch = X_shuffled[start_idx:end_idx]
-                    Y_batch = Y_shuffled[start_idx:end_idx]
-                    batch_size_actual = end_idx - start_idx
+                X_batch = X_shuffled[start_idx:end_idx]
+                Y_batch = Y_shuffled[start_idx:end_idx]
+                batch_size_actual = end_idx - start_idx
 
-                    # Clear the params
-                    self.forward_params = []
+                # Clear the params
+                self.forward_params = []
 
-                    # Forward pass
-                    self.forward(X_batch, training=True)
+                # Forward pass
+                self.forward(X_batch)
 
-                    # Calculate cost for this batch
-                    batch_cost = self.calculate_cost(Y_batch)
+                # Calculate cost for this batch
+                batch_cost = self.calculate_cost(Y_batch)
 
-                    if batch_idx % 1 == 0:  # Print every batch
-                        print(f"Epoch {i+1}/{self.epoch_start + epochs}, Batch {batch_idx+1}/{num_batches}: Cost = {batch_cost:.6f}", flush=True)
-                    epoch_cost += batch_cost
+                if batch_idx % 1 == 0:  # Print every batch
+                    print(f"Epoch {i+1}/{epochs}, Batch {batch_idx+1}/{num_batches}: Cost = {batch_cost:.6f}", flush=True)
+                epoch_cost += batch_cost
 
-                    # Calculate gradient for backward pass
-                    # For softmax cross-entropy: dA = (A - Y_onehot) / batch_size
-                    y_hat = self.forward_params[-1]
+                # Calculate gradient for backward pass
+                # For softmax cross-entropy: dA = (A - Y_onehot) / batch_size
+                y_hat = self.forward_params[-1]
 
-                    # Handle different output shapes - convert to (N, D_out) format
-                    if len(y_hat.shape) == 4:  # (N, H, W, C)
-                        y_hat = y_hat.reshape(y_hat.shape[0], -1)
-                        num_classes = y_hat.shape[1]
-                    elif len(y_hat.shape) == 2:
-                        # FC layer outputs (N, D_out) format
-                        if y_hat.shape[0] == batch_size_actual:
-                             # Correct (N, D_out)
-                             num_classes = y_hat.shape[1]
-                        elif y_hat.shape[1] == batch_size_actual:
-                            # (D_out, N) -> Transpose to (N, D_out)
-                            num_classes = y_hat.shape[0]
-                            y_hat = y_hat.T
-                        else:
-                            raise ValueError(f"Unexpected output shape: {y_hat.shape}")
+                # Handle different output shapes - convert to (N, D_out) format
+                if len(y_hat.shape) == 4:  # (N, H, W, C)
+                    y_hat = y_hat.reshape(y_hat.shape[0], -1)
+                    num_classes = y_hat.shape[1]
+                elif len(y_hat.shape) == 2:
+                    # FC layer outputs (N, D_out) format
+                    if y_hat.shape[0] == batch_size_actual:
+                         # Correct (N, D_out)
+                         num_classes = y_hat.shape[1]
+                    elif y_hat.shape[1] == batch_size_actual:
+                        # (D_out, N) -> Transpose to (N, D_out)
+                        num_classes = y_hat.shape[0]
+                        y_hat = y_hat.T
                     else:
                         raise ValueError(f"Unexpected output shape: {y_hat.shape}")
+                else:
+                    raise ValueError(f"Unexpected output shape: {y_hat.shape}")
 
-                    # Create one-hot encoding for Y_batch
-                    Y_onehot = np.zeros((batch_size_actual, num_classes)) # (N, D_out)
-                    Y_onehot[np.arange(batch_size_actual), Y_batch.flatten()] = 1
-                    # Backward pass
-                    self.backward(Y_onehot)
+                # Create one-hot encoding for Y_batch
+                Y_onehot = np.zeros((batch_size_actual, num_classes)) # (N, D_out)
+                Y_onehot[np.arange(batch_size_actual), Y_batch.flatten()] = 1
+                # Backward pass
+                self.backward(Y_onehot)
 
-                # Average cost for the epoch
-                if num_batches > 0:
-                    epoch_cost /= num_batches
-                    # if len(self.cost_history) > 0 and epoch_cost > self.cost_history[-1]:
-                    #     self.learning_rate *= 0.5
-                        
-                    # else:
-                    #     self.learning_rate *= 1.05
-                    self.learning_rate *= 0.95
-                    self.unified_hyperparam(learn_rate=self.learning_rate)
-                    self.cost_history.append(epoch_cost)
-            
+            # Average cost for the epoch
+            if num_batches > 0:
+                epoch_cost /= num_batches
+                # if len(self.cost_history) > 0 and epoch_cost > self.cost_history[-1]:
+                #     self.learning_rate *= 0.5
+                    
+                # else:
+                #     self.learning_rate *= 1.05
+                self.learning_rate *= 0.95
+                self.unified_hyperparam(learn_rate=self.learning_rate)
+                self.cost_history.append(epoch_cost)
+        
 
-                # Print progress every epoch
-                if print_cost:
-                    print(f'Epoch {i+1:3d}/{self.epoch_start + epochs}: Cost = {epoch_cost:.6f}')
+            # Print progress every epoch
+            if print_cost:
+                print(f'Epoch {i+1:3d}/{epochs}: Cost = {epoch_cost:.6f}')
 
-                # Update global epoch counter
-                self.epoch_start = i + 1
-                
-                # Save model at end of epoch
-                if save_path:
-                    self.save(save_path)
-
-                if i > 0 and len(self.cost_history) >= 2 and abs(self.cost_history[-1] - self.cost_history[-2]) < tolerance:
-                    print(f'Converged after {i+1} epochs')
-                    break
-        except KeyboardInterrupt:
-            print("\nTraining interrupted by user.")
-            if save_path:
-                print(f"Saving model to {save_path}...")
-                self.save(save_path)
-            return self.cost_history
+            if i > 0 and len(self.cost_history) >= 2 and abs(self.cost_history[-1] - self.cost_history[-2]) < tolerance:
+                print(f'Converged after {i+1} epochs')
+                break
 
         print("Training completed!")
         return self.cost_history
@@ -836,7 +788,7 @@ class CNN:
     def predict(self, X:np.ndarray)->np.ndarray:
         """Make predictions on input data"""
         # Forward pass
-        output = self.forward(X, training=False)
+        output = self.forward(X)
 
         # Handle different output shapes
         if len(output.shape) == 4:  # (N, H, W, C)
@@ -907,6 +859,8 @@ A = A.transpose(0,3,1,2) / 255.0 # (N,1,28,28)
 y_onehot = labels_train
 
 
+
+
 # Prepare test data
 A_test = images.reshape(-1,28,28,1) # (N,28,28,1)
 A_test = A_test.transpose(0,3,1,2) # (N,1,28,28)
@@ -919,47 +873,32 @@ print(f"Test:  X={A_test.shape}, Y={y_test.shape}")
 
 # Create CNN model - Moderate complexity with lower learning rate
 
-# Define base path relative to the script location
-script_dir = os.path.dirname(os.path.abspath(__file__))
+cnn = CNN(layers=[
+    Conv(filter_num=8, filter_size=3, filter_channel=1, stride=1, _Adam=1, learn_rate=0.01),
+    Conv(filter_num=8, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.01),
+    BatchNorm(_Adam=1, learn_rate=0.01),
+    Activation('relu'),
 
-# Define model path in 'models' directory
-model_dir = os.path.join(script_dir, 'models')
-os.makedirs(model_dir, exist_ok=True)
-model_path = os.path.join(model_dir, 'cnn_model.pkl')
-
-if os.path.exists(model_path):
-    print(f"Loading existing model from {model_path}...")
-    cnn = CNN.load(model_path)
-else:
-    print("Creating new model...")
-    cnn = CNN(layers=[
-        Conv(filter_num=8, filter_size=3, filter_channel=1, stride=1, _Adam=1, learn_rate=0.001),
-        Conv(filter_num=8, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
-
-        Pooling(pool_size=3, stride=3),
-        Conv(filter_num=16, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.001),
-        Conv(filter_num=16, filter_size=3, filter_channel=16, stride=1, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
-        
-        Pooling(pool_size=3, stride=3),
-        FC(output_size=256, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
-        Dropout(drop_rate=0.1), # Added Dropout here
-        FC(output_size=64, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
-        Dropout(drop_rate=0.1), # Added Dropout here
-        FC(output_size=10, _Adam=1, learn_rate=0.001),
-        Activation('softmax')
-    ])
+    Pooling(pool_size=3, stride=3),
+    Conv(filter_num=16, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.01),
+    Conv(filter_num=16, filter_size=3, filter_channel=16, stride=1, _Adam=1, learn_rate=0.01),
+    BatchNorm(_Adam=1, learn_rate=0.01),
+    Activation('relu'),
+    
+    Pooling(pool_size=3, stride=3),
+    FC(output_size=128, _Adam=1, learn_rate=0.01),
+    BatchNorm(_Adam=1, learn_rate=0.01),
+    Activation('relu'),
+    FC(output_size=64, _Adam=1, learn_rate=0.01),
+    BatchNorm(_Adam=1, learn_rate=0.01),
+    Activation('relu'),
+    FC(output_size=10, _Adam=1, learn_rate=0.01),
+    Activation('softmax')
+])
 
 # Train the model
 print("\nStarting training...")
-cost_history = cnn.train(X=A, Y=y_onehot, epochs=10, batch_size=1024, save_path=model_path)
+cost_history = cnn.train(X=A, Y=y_onehot, epochs=10, batch_size=1024)
 
 # Evaluate on test set
 print("\nEvaluating on test set...")
@@ -974,10 +913,24 @@ plt.ylabel('Cost')
 plt.title('Training Cost History')
 plt.grid(True)
 # plt.show()
-# Ensure directory exists before saving
-imgs_dir = os.path.join(script_dir, 'imgs')
-os.makedirs(imgs_dir, exist_ok=True)
-plt.savefig(os.path.join(imgs_dir, 'cost_history.png'))
+plt.savefig('cost_history.png')
 
-print(f"\nFinal training cost: {cost_history[-1] if cost_history else 0:.6f}")
+print(f"\nFinal training cost: {cost_history[-1]:.6f}")
 print(f"Test accuracy: {test_accuracy:.2%}")
+
+
+"""
+1. 全连接层使用了 Sigmoid 激活函数（主要原因）
+你现在的代码中，隐藏层的全连接层使用了 Sigmoid：
+FC(output_size=512, ...),Activation('sigmoid'),  # <--- 这里是瓶颈
+问题：Sigmoid 函数的导数最大只有 0.25（在 x=0 时），且在两端趋近于 0。当层数加深时，梯度在反向传播过程中会经过连续的链式法则相乘。例如经过 3 层 Sigmoid，梯度会至少衰减为 $0.25^3 \approx 0.015$。这会导致前面的卷积层几乎收不到梯度更新，也就无法学习到特征（即梯度消失）。
+解决：请将隐藏层的激活函数改为 relu。ReLU 在正区间的导数为 1，可以很好地保持梯度强度，支持更深的网络训练。
+2. 缺乏 Batch Normalization (BN层)
+问题：现代深度网络（如 VGG, ResNet）之所以能堆叠几十层，核心归功于 Batch Normalization。没有 BN 层，深层网络的每一层输入分布都会剧烈变化（Internal Covariate Shift），导致训练非常困难，必须使用极小的学习率，收敛极慢。
+现状：你的实现中没有 BN 层。在这种情况下，超过 3-4 层的网络（尤其是包含多个卷积堆叠时）非常难训练。
+解决：在手写框架中实现 BN 比较复杂。如果没有 BN，建议保持网络“浅而宽”（例如 2 个卷积层 + 1-2 个全连接层），或者严格使用 ReLU 和较好的初始化（你的 He 初始化是 OK 的）。
+3. 学习率策略震荡
+问题：你代码中加入的 cost 上升就 *0.5，下降就 *1.05 的策略过于激进。对于深层网络，Loss 表面更复杂，这种大幅度的学习率跳变会导致模型在一个局部极小值附近反复横跳，无法收敛。
+解决：使用平滑的衰减策略（如每 Epoch 衰减 0.95），或者完全信赖 Adam 优化器的自适应能力，固定一个较小的学习率（如 0.001）。
+
+"""
