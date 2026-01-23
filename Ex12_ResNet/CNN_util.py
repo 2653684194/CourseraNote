@@ -974,10 +974,12 @@ class Dropout(layer):
         pass
     def set_optimizer_state(self, optimizer_state:dict):
         pass
+
 # Residual Block
 class ResBlock(layer):
     def __init__():
         pass
+
 
 class CNN:
     def __init__(self,layers:list[layer],
@@ -1148,11 +1150,13 @@ class CNN:
             # print(f"DEBUG CNN.forward: Processing layer {i}: {layer_type}, input shape={self.forward_params[-1].shape}")
             # sys.stdout.flush()
             # 尝试传递 training 参数（BatchNorm / Dropout 会用到）
+
             try:
                 out = layer.forward_prop(self.forward_params[-1], training=training)
             except TypeError:
                 # 不支持 training 参数的层（Conv / FC / Pooling / Activation）
                 out = layer.forward_prop(self.forward_params[-1])
+            
             # Debug output (commented out)
             # print(f"DEBUG CNN.forward: Layer {i} ({layer_type}) completed, output shape={out.shape}")
             # sys.stdout.flush()
@@ -1184,7 +1188,8 @@ class CNN:
     
     def train(self,X:np.ndarray,Y:np.ndarray,epochs:int=1000,batch_size:int=32,tolerance:float=1e-6,print_cost:bool=True, save_path:str=None):
         N = X.shape[0]
-        num_batches = N // batch_size + 1  # Ceiling division
+        # num_batches = N // batch_size + 1  # 这个计算有误，当batch_size整除N时，会多算一个batch
+        num_batches = (N + batch_size - 1) // batch_size  # 修正计算方式
         
         print(f"Training with {N} samples, batch_size={batch_size}, num_batches={num_batches}")
         epoch_accumulated = 0
