@@ -370,36 +370,6 @@ class Activation(layer):
             
             d_Z = d_A * sigmoid_z * (1 - sigmoid_z)
         elif self.activation == 'softmax':
-            # Softmax + CrossEntropy combination typically simplifies to (A - Y)
-            # Here we assume d_A is passed as (y_hat - y_onehot) if combined, 
-            # BUT standard backprop for activation layer alone is different.
-            # However, in this codebase, the training loop passes (A - Y_onehot) as dY to the last layer.
-            # If the last layer IS Softmax, then d_Z = d_A if d_A was indeed passed as (A - Y).
-            # But wait, self.backward(Y_onehot) passes Y_onehot directly? No.
-            
-            # In CNN.train:
-            # y_hat = self.forward_params[-1] (Softmax output)
-            # Y_onehot created.
-            # self.backward(Y_onehot)
-            
-            # If CNN.backward takes Y_onehot as dY, let's check:
-            # def backward(self,dY:np.ndarray):
-            #     for i in range(self.len-1,-1,-1):
-            #         dY = self.layers[i].backward_prop(dY)
-            
-            # So the last layer (Softmax) receives Y_onehot as dY? That seems wrong for standard notation (dY usually means dL/dY).
-            # But let's look at the old implementation:
-            # d_Z = self.Indice - d_A # y_hat-y_onehot
-            
-            # So d_A coming in is treated as Y_onehot (target).
-            # And the output d_Z is (y_hat - y_target).
-            # This is the gradient of CrossEntropy + Softmax combined w.r.t Z.
-            
-            # So if input d_A is actually Y_onehot (N, D_out)
-            # And self.Indice is y_hat (N, D_out)
-            # Then d_Z = (y_hat - Y_onehot) / N (if averaging) or just sum.
-            # The previous implementation divided by batch size in backward_prop? No, it did:
-            # d_Z = (self.Indice - d_A) / N
             
             N = self.Indice.shape[0] # N is axis 0 now
             d_Z = (self.Indice - d_A) / N # y_hat - y_onehot normalized
@@ -736,7 +706,7 @@ class CNN:
         print(f"Training with {N} samples, batch_size={batch_size}, num_batches={num_batches}")
 
         try:
-            for i in range(self.epoch_start, self.epoch_start + epochs):
+            for i in range(epochs):
                 # Shuffle data at the beginning of each epoch
                 indices = np.random.permutation(N)
                 X_shuffled = X[indices]
@@ -763,9 +733,9 @@ class CNN:
 
                     # Calculate cost for this batch
                     batch_cost = self.calculate_cost(Y_batch)
-
-                    if batch_idx % 1 == 0:  # Print every batch
-                        print(f"Epoch {i+1}/{self.epoch_start + epochs}, Batch {batch_idx+1}/{num_batches}: Cost = {batch_cost:.6f}", flush=True)
+                    gap = num_batches // 10
+                    if batch_idx % gap == 0: 
+                        print(f"Epoch {i}/{self.epoch_start + epochs}, Batch {batch_idx+1}/{num_batches}: Cost = {batch_cost:.6f}", flush=True)
                     epoch_cost += batch_cost
 
                     # Calculate gradient for backward pass
@@ -855,30 +825,6 @@ class CNN:
         return accuracy
 
 
-# Define base path
-base_path = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(base_path, 'data', 'MNIST', 'raw')
-
-# load t10k-images.idx3-ubyte
-def load_mnist_images(filename):
-    with open(filename, 'rb') as f:
-        data = f.read()
-    return data
-images = load_mnist_images(os.path.join(data_dir, 't10k-images-idx3-ubyte'))
-
-# 16字节的文件头 + 10000张图片 * 28 * 28像素 = 7840016字节
-images = np.frombuffer(images, np.uint8, offset=16).reshape(-1, 28*28)
-
-# load t10k-labels.idx1-ubyte
-def load_mnist_labels(filename):
-    with open(filename, 'rb') as f:
-        data = f.read()
-    return data
-labels = load_mnist_labels(os.path.join(data_dir, 't10k-labels-idx1-ubyte'))
-# 8字节的文件头 + 10000个标签 = 10008字节
-labels = np.frombuffer(labels, np.uint8, offset=8).reshape(-1, 1)
-
-
 # 批量show
 def show_images(images, labels, num_images=10, bias=0):
     plt.figure(figsize=(10, 1))
@@ -889,95 +835,123 @@ def show_images(images, labels, num_images=10, bias=0):
         plt.axis('off')
     plt.show()
 
+# load t10k-labels.idx1-ubyte
+def load_mnist_labels(filename):
+    with open(filename, 'rb') as f:
+        data = f.read()
+    return data
 
-# load train-images.idx3-ubyte
-images_train = load_mnist_images(os.path.join(data_dir, 'train-images-idx3-ubyte'))
-images_train = np.frombuffer(images_train, np.uint8, offset=16).reshape(-1, 28*28) #(N, 28*28)
+if __name__ == "__main__":
+    # Define base path
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_path, 'data', 'MNIST', 'raw')
 
-# load train-labels.idx1-ubyte
-labels_train = load_mnist_labels(os.path.join(data_dir, 'train-labels-idx1-ubyte'))
-# 8字节的文件头 + 60000个标签 = 10008字节
-labels_train = np.frombuffer(labels_train, np.uint8, offset=8).reshape(-1, 1) #(N, 1)
+    # load t10k-images.idx3-ubyte
+    def load_mnist_images(filename):
+        with open(filename, 'rb') as f:
+            data = f.read()
+        return data
+    images = load_mnist_images(os.path.join(data_dir, 't10k-images-idx3-ubyte'))
 
-# show_images(images_train, labels_train, num_images=10 ,bias = 0)
-
-
-A = images_train.reshape(-1,28,28,1) # (N,28,28,1)
-A = A.transpose(0,3,1,2) / 255.0 # (N,1,28,28)
-y_onehot = labels_train
+    # 16字节的文件头 + 10000张图片 * 28 * 28像素 = 7840016字节
+    images = np.frombuffer(images, np.uint8, offset=16).reshape(-1, 28*28)
 
 
-# Prepare test data
-A_test = images.reshape(-1,28,28,1) # (N,28,28,1)
-A_test = A_test.transpose(0,3,1,2) # (N,1,28,28)
-A_test = A_test / 255.0
-y_test = labels
+    labels = load_mnist_labels(os.path.join(data_dir, 't10k-labels-idx1-ubyte'))
+    # 8字节的文件头 + 10000个标签 = 10008字节
+    labels = np.frombuffer(labels, np.uint8, offset=8).reshape(-1, 1)
 
-print("Data shapes:")
-print(f"Train: X={A.shape}, Y={y_onehot.shape}")
-print(f"Test:  X={A_test.shape}, Y={y_test.shape}")
 
-# Create CNN model - Moderate complexity with lower learning rate
 
-# Define base path relative to the script location
-script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Define model path in 'models' directory
-model_dir = os.path.join(script_dir, 'models')
-os.makedirs(model_dir, exist_ok=True)
-model_path = os.path.join(model_dir, 'cnn_model.pkl')
+    # load train-images.idx3-ubyte
+    images_train = load_mnist_images(os.path.join(data_dir, 'train-images-idx3-ubyte'))
+    images_train = np.frombuffer(images_train, np.uint8, offset=16).reshape(-1, 28*28) #(N, 28*28)
 
-if os.path.exists(model_path):
-    print(f"Loading existing model from {model_path}...")
-    cnn = CNN.load(model_path)
-else:
-    print("Creating new model...")
-    cnn = CNN(layers=[
-        Conv(filter_num=8, filter_size=3, filter_channel=1, stride=1, _Adam=1, learn_rate=0.001),
-        Conv(filter_num=8, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
+    # load train-labels.idx1-ubyte
+    labels_train = load_mnist_labels(os.path.join(data_dir, 'train-labels-idx1-ubyte'))
+    # 8字节的文件头 + 60000个标签 = 10008字节
+    labels_train = np.frombuffer(labels_train, np.uint8, offset=8).reshape(-1, 1) #(N, 1)
 
-        Pooling(pool_size=3, stride=3),
-        Conv(filter_num=16, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.001),
-        Conv(filter_num=16, filter_size=3, filter_channel=16, stride=1, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
-        
-        Pooling(pool_size=3, stride=3),
-        FC(output_size=256, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
-        Dropout(drop_rate=0.1), # Added Dropout here
-        FC(output_size=64, _Adam=1, learn_rate=0.001),
-        BatchNorm(_Adam=1, learn_rate=0.001),
-        Activation('relu'),
-        Dropout(drop_rate=0.1), # Added Dropout here
-        FC(output_size=10, _Adam=1, learn_rate=0.001),
-        Activation('softmax')
-    ])
+    # show_images(images_train, labels_train, num_images=10 ,bias = 0)
 
-# Train the model
-print("\nStarting training...")
-cost_history = cnn.train(X=A, Y=y_onehot, epochs=10, batch_size=1024, save_path=model_path)
 
-# Evaluate on test set
-print("\nEvaluating on test set...")
-test_accuracy = cnn.evaluate(A_test, y_test)
-print(f"Test accuracy: {test_accuracy:.2%}")
+    A = images_train.reshape(-1,28,28,1) # (N,28,28,1)
+    A = A.transpose(0,3,1,2) / 255.0 # (N,1,28,28)
+    y_onehot = labels_train
 
-# Show cost history
-plt.figure(figsize=(10, 6))
-plt.plot(cost_history, 'b-', linewidth=2)
-plt.xlabel('Epoch')
-plt.ylabel('Cost')
-plt.title('Training Cost History')
-plt.grid(True)
-# plt.show()
-# Ensure directory exists before saving
-imgs_dir = os.path.join(script_dir, 'imgs')
-os.makedirs(imgs_dir, exist_ok=True)
-plt.savefig(os.path.join(imgs_dir, 'cost_history.png'))
 
-print(f"\nFinal training cost: {cost_history[-1] if cost_history else 0:.6f}")
-print(f"Test accuracy: {test_accuracy:.2%}")
+    # Prepare test data
+    A_test = images.reshape(-1,28,28,1) # (N,28,28,1)
+    A_test = A_test.transpose(0,3,1,2) # (N,1,28,28)
+    A_test = A_test / 255.0
+    y_test = labels
+
+    print("Data shapes:")
+    print(f"Train: X={A.shape}, Y={y_onehot.shape}")
+    print(f"Test:  X={A_test.shape}, Y={y_test.shape}")
+
+    # Create CNN model - Moderate complexity with lower learning rate
+
+    # Define base path relative to the script location
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Define model path in 'models' directory
+    model_dir = os.path.join(script_dir, 'models')
+    os.makedirs(model_dir, exist_ok=True)
+    model_path = os.path.join(model_dir, 'cnn_model.pkl')
+
+    if os.path.exists(model_path):
+        print(f"Loading existing model from {model_path}...")
+        cnn = CNN.load(model_path)
+    else:
+        print("Creating new model...")
+        cnn = CNN(layers=[
+            Conv(filter_num=8, filter_size=3, filter_channel=1, stride=1, _Adam=1, learn_rate=0.001),
+            Conv(filter_num=8, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.001),
+            BatchNorm(_Adam=1, learn_rate=0.001),
+            Activation('relu'),
+
+            Pooling(pool_size=3, stride=3),
+            Conv(filter_num=16, filter_size=3, filter_channel=8, stride=1, _Adam=1, learn_rate=0.001),
+            Conv(filter_num=16, filter_size=3, filter_channel=16, stride=1, _Adam=1, learn_rate=0.001),
+            BatchNorm(_Adam=1, learn_rate=0.001),
+            Activation('relu'),
+            
+            Pooling(pool_size=3, stride=3),
+            FC(output_size=256, _Adam=1, learn_rate=0.001),
+            BatchNorm(_Adam=1, learn_rate=0.001),
+            Activation('relu'),
+            Dropout(drop_rate=0.1), # Added Dropout here
+            FC(output_size=64, _Adam=1, learn_rate=0.001),
+            BatchNorm(_Adam=1, learn_rate=0.001),
+            Activation('relu'),
+            Dropout(drop_rate=0.1), # Added Dropout here
+            FC(output_size=10, _Adam=1, learn_rate=0.001),
+            Activation('softmax')
+        ])
+
+    # Train the model
+    print("\nStarting training...")
+    cost_history = cnn.train(X=A, Y=y_onehot, epochs=10, batch_size=1024, save_path=model_path)
+
+    # Evaluate on test set
+    print("\nEvaluating on test set...")
+    test_accuracy = cnn.evaluate(A_test, y_test)
+    print(f"Test accuracy: {test_accuracy:.2%}")
+
+    # Show cost history
+    plt.figure(figsize=(10, 6))
+    plt.plot(cost_history, 'b-', linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('Cost')
+    plt.title('Training Cost History')
+    plt.grid(True)
+    # plt.show()
+    # Ensure directory exists before saving
+    imgs_dir = os.path.join(script_dir, 'imgs')
+    os.makedirs(imgs_dir, exist_ok=True)
+    plt.savefig(os.path.join(imgs_dir, 'cost_history.png'))
+
+    print(f"\nFinal training cost: {cost_history[-1] if cost_history else 0:.6f}")
+    print(f"Test accuracy: {test_accuracy:.2%}")
