@@ -138,7 +138,7 @@ class layer:
         pass
     def backward_prop(self,dY:np.ndarray)->np.ndarray:
         pass
-    def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
         pass
 
 
@@ -150,7 +150,7 @@ class Conv(layer):
     def __init__(
             self, filter_num, filter_size, filter_channel, stride=1, 
             _Adam = 0, Adam_beta1=0.9, Adam_beta2=0.999, epsilon=1e-8,
-            learn_rate=0.001, same_padding:bool=False):
+            learning_rate=0.001, same_padding:bool=False):
         self.filter_num = filter_num
         self.filter_size = filter_size
         self.filter_channel = filter_channel
@@ -178,7 +178,7 @@ class Conv(layer):
         self.col_shape = None
         # update params
         self.epsilon = epsilon
-        self.learn_rate = learn_rate
+        self.learning_rate = learning_rate
         # Adam optimizer
         self._Adam = _Adam
         self.Adam_beta1 = Adam_beta1
@@ -236,8 +236,8 @@ class Conv(layer):
         self.S_bias = optimizer_state['S_bias']
         self.V_bias = optimizer_state['V_bias']
 
-    def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
-        self.learn_rate = learn_rate
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+        self.learning_rate = learning_rate
         if _Adam is not None:
             self._Adam = _Adam
         if beta1 is not None:
@@ -343,13 +343,13 @@ class Conv(layer):
         if self._Adam:
             self.V_F = self.Adam_beta1 * self.V_F + (1-self.Adam_beta1) * d_F # (X_C * filter_size * filter_size, f_n^{l})
             self.S_F = self.Adam_beta2 * self.S_F + (1-self.Adam_beta2) * np.power(d_F,2) # (X_C * filter_size * filter_size, f_n^{l})
-            self.F = self.F - self.learn_rate * self.V_F / (np.sqrt(self.S_F) + self.epsilon) # (X_C * filter_size * filter_size, f_n^{l})
+            self.F = self.F - self.learning_rate * self.V_F / (np.sqrt(self.S_F) + self.epsilon) # (X_C * filter_size * filter_size, f_n^{l})
             self.V_bias = self.Adam_beta1 * self.V_bias + (1-self.Adam_beta1) * d_bias # (1,f_n^{l})
             self.S_bias = self.Adam_beta2 * self.S_bias + (1-self.Adam_beta2) * np.power(d_bias,2) # (1,f_n^{l})
-            self.bias = self.bias - self.learn_rate * self.V_bias / (np.sqrt(self.S_bias) + self.epsilon) # (1,f_n^{l})
+            self.bias = self.bias - self.learning_rate * self.V_bias / (np.sqrt(self.S_bias) + self.epsilon) # (1,f_n^{l})
         else:
-            self.F = self.F - self.learn_rate * d_F # (X_C * filter_size * filter_size, f_n^{l})
-            self.bias = self.bias - self.learn_rate * d_bias # (1,f_n^{l})  
+            self.F = self.F - self.learning_rate * d_F # (X_C * filter_size * filter_size, f_n^{l})
+            self.bias = self.bias - self.learning_rate * d_bias # (1,f_n^{l})  
         d_X_col = d_X_col.reshape(self.col_shape) # (N, h_out, w_out, filter_c, filter_size, filter_size)
         d_X = col2img(d_X_col,stride=self.stride, padding=self.padding) # (N,X_C^{l-1}, X_H^{l-1}, X_W^{l-1}) 
         # print(f"DEBUG: Conv.backward_prop: d_X shape={d_X.shape}")
@@ -364,12 +364,12 @@ class BatchNorm(layer):
     def __init__(self,
             _Adam = 0, Adam_beta1=0.9, Adam_beta2=0.999, epsilon=1e-8,
             momentum=0.8,
-            learn_rate=0.001):
+            learning_rate=0.001):
         self._Adam = _Adam
         self.Adam_beta1 = Adam_beta1
         self.Adam_beta2 = Adam_beta2
         self.epsilon = epsilon
-        self.learn_rate = learn_rate
+        self.learning_rate = learning_rate
 
         
         self.input_shape = None
@@ -402,7 +402,7 @@ class BatchNorm(layer):
             'Adam_beta2': self.Adam_beta2,
             'epsilon': self.epsilon,
             'momentum': self.momentum,
-            'learn_rate': self.learn_rate,
+            'learning_rate': self.learning_rate,
         }
     def get_weights(self):
         return {
@@ -425,7 +425,7 @@ class BatchNorm(layer):
         self.Adam_beta2 = config['Adam_beta2']
         self.epsilon = config['epsilon']
         self.momentum = config['momentum']
-        self.learn_rate = config['learn_rate']
+        self.learning_rate = config['learning_rate']
     def set_weights(self, weights:dict):
         # 兼容旧模型：老的 npz 里没有 running_mean / running_var
         self.gamma = weights.get('gamma', self.gamma)
@@ -438,8 +438,8 @@ class BatchNorm(layer):
         self.S_beta = optimizer_state['S_beta']
         self.V_beta = optimizer_state['V_beta']
 
-    def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
-        self.learn_rate = learn_rate
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+        self.learning_rate = learning_rate
         if _Adam is not None:
             self._Adam = _Adam
         if beta1 is not None:
@@ -532,13 +532,13 @@ class BatchNorm(layer):
         if self._Adam:
             self.V_gamma = self.Adam_beta1 * self.V_gamma + (1-self.Adam_beta1) * d_gamma
             self.S_gamma = self.Adam_beta2 * self.S_gamma + (1-self.Adam_beta2) * np.power(d_gamma,2)
-            self.gamma = self.gamma - self.learn_rate * self.V_gamma / (np.sqrt(self.S_gamma) + self.epsilon)
+            self.gamma = self.gamma - self.learning_rate * self.V_gamma / (np.sqrt(self.S_gamma) + self.epsilon)
             self.V_beta = self.Adam_beta1 * self.V_beta + (1-self.Adam_beta1) * d_beta
             self.S_beta = self.Adam_beta2 * self.S_beta + (1-self.Adam_beta2) * np.power(d_beta,2)
-            self.beta = self.beta - self.learn_rate * self.V_beta / (np.sqrt(self.S_beta) + self.epsilon)
+            self.beta = self.beta - self.learning_rate * self.V_beta / (np.sqrt(self.S_beta) + self.epsilon)
         else:
-            self.gamma = self.gamma - self.learn_rate * d_gamma
-            self.beta = self.beta - self.learn_rate * d_beta
+            self.gamma = self.gamma - self.learning_rate * d_gamma
+            self.beta = self.beta - self.learning_rate * d_beta
         d_Z = (self.gamma / np.sqrt(self.sigma + self.epsilon)) * (d_y_tilde - B - D)
 
         # print(f"DEBUG: BatchNorm.backward_prop: d_Z shape={d_Z.shape}")
@@ -571,7 +571,7 @@ class Activation(layer):
     def set_optimizer_state(self, optimizer_state:dict):
         pass
 
-    def modified_hyperparam(self, learn_rate:float=0.001,
+    def modified_hyperparam(self, learning_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
         pass
     @staticmethod
@@ -662,7 +662,7 @@ class Pooling(layer):# check
     def set_optimizer_state(self, optimizer_state:dict):
         pass
 
-    def modified_hyperparam(self, learn_rate:float=0.001,
+    def modified_hyperparam(self, learning_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
         pass
     def forward_prop(self,A:np.ndarray)->np.ndarray:
@@ -828,7 +828,7 @@ class Pooling(layer):# check
 class FC(layer): # fully connected layer
     def __init__(self,output_size,
                 _Adam = 0, Adam_beta1=0.9, Adam_beta2=0.999, epsilon=1e-8,
-                learn_rate=0.001):
+                learning_rate=0.001):
         self.input_size = None # default None, will be set in forward_prop
         self.output_size = output_size
 
@@ -844,7 +844,7 @@ class FC(layer): # fully connected layer
         self.Adam_beta1 = Adam_beta1
         self.Adam_beta2 = Adam_beta2
         self.epsilon = epsilon
-        self.learn_rate = learn_rate
+        self.learning_rate = learning_rate
         
         self.S_W = None  # Will be initialized when W is created
         self.V_W = None
@@ -880,9 +880,9 @@ class FC(layer): # fully connected layer
         self.V_b = optimizer_state['V_b']
 
 
-    def modified_hyperparam(self, learn_rate:float=0.001,
+    def modified_hyperparam(self, learning_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
-        self.learn_rate = learn_rate
+        self.learning_rate = learning_rate
         if _Adam is not None:
             self._Adam = _Adam
         if beta1 is not None:
@@ -928,13 +928,13 @@ class FC(layer): # fully connected layer
         if self._Adam:
             self.V_W = self.Adam_beta1 * self.V_W + (1-self.Adam_beta1) * d_W # (D_in, D_out)
             self.S_W = self.Adam_beta2 * self.S_W + (1-self.Adam_beta2) * np.power(d_W,2) # (D_in, D_out)
-            self.W = self.W - self.learn_rate * self.V_W / (np.sqrt(self.S_W) + self.epsilon) # (D_in, D_out)
+            self.W = self.W - self.learning_rate * self.V_W / (np.sqrt(self.S_W) + self.epsilon) # (D_in, D_out)
             self.V_b = self.Adam_beta1 * self.V_b + (1-self.Adam_beta1) * d_b # (1, D_out)
             self.S_b = self.Adam_beta2 * self.S_b + (1-self.Adam_beta2) * np.power(d_b,2) # (1, D_out)
-            self.b = self.b - self.learn_rate * self.V_b / (np.sqrt(self.S_b) + self.epsilon) # (1, D_out)
+            self.b = self.b - self.learning_rate * self.V_b / (np.sqrt(self.S_b) + self.epsilon) # (1, D_out)
         else:
-            self.W = self.W - self.learn_rate * d_W # (D_in, D_out)
-            self.b = self.b - self.learn_rate * d_b # (1, D_out)
+            self.W = self.W - self.learning_rate * d_W # (D_in, D_out)
+            self.b = self.b - self.learning_rate * d_b # (1, D_out)
         # print(f"DEBUG: FC.backward_prop: d_A shape={d_A.shape}")
         return d_A # (N, f_n^{l}, X_H^{l}, X_W^{l})
 
@@ -1131,15 +1131,15 @@ class CNN:
                 print(f"Warning: Could not load training state: {e}")
         
         # 4. Synchronize hyperparameters (learning rate, etc.) to all layers
-        cnn.unified_hyperparam(learn_rate=cnn.learning_rate)
+        cnn.unified_hyperparam(learning_rate=cnn.learning_rate)
 
         print("Model loaded successfully.")
         return cnn
 
-    def unified_hyperparam(self, learn_rate:float=0.001,
+    def unified_hyperparam(self, learning_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
         for layer in self.layers:
-            layer.modified_hyperparam(learn_rate, _Adam, beta1, beta2, epsilon)
+            layer.modified_hyperparam(learning_rate, _Adam, beta1, beta2, epsilon)
         
     def forward(self,X:np.ndarray,Y:np.ndarray=None, training:bool=True)->np.ndarray:
         self.forward_params = [X]  # Reset forward params for each forward pass
@@ -1261,7 +1261,7 @@ class CNN:
                     self.cost_history.append(epoch_cost)
                     # 不适用学习率震荡更新， 依赖Adam优化器， 或者用learning rate decay
                     self.learning_rate *= 0.99
-                    self.unified_hyperparam(learn_rate=self.learning_rate)
+                    self.unified_hyperparam(learning_rate=self.learning_rate)
 
                 if print_cost:
                     print(f'Cost after epoch {i}: {epoch_cost:.6f}')
