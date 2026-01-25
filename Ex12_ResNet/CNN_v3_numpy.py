@@ -2,7 +2,6 @@ import numpy as np
 from numpy.lib.stride_tricks import as_strided
 import matplotlib.pyplot as plt
 import os
-import json
 
 def img2col(X:np.ndarray, filter_size:int, stride:int = 1, padding:tuple[int,int,int,int]=(0,0,0,0), dilation:int = 1)->np.ndarray:
     '''
@@ -305,11 +304,11 @@ class layer:
         pass
     def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
         pass # 无参数层不需要更新超参数
-    def get_config(self): return {}
-    def get_weights(self): return {}
-    def set_weights(self, weights): pass
-    def get_optimizer_state(self): return {}
-    def set_optimizer_state(self, state): pass
+    def get_config(self): return None
+    def set_config(self, config:dict): pass
+    def get_weights(self): return None
+    def set_weights(self, weights:dict): pass
+
 
 class TrainableLayer(layer):
     def __init__(self, learning_rate=0.001, _Adam=False, Adam_beta1=0.9, Adam_beta2=0.999, epsilon=1e-8):
@@ -375,6 +374,8 @@ class Conv(TrainableLayer):
             'filter_size': self.filter_size,
             'filter_channel': self.filter_channel,
             'stride': self.stride,
+
+            'learning_rate': self.learning_rate,
             '_Adam': self._Adam,
             'Adam_beta1': self.Adam_beta1,
             'Adam_beta2': self.Adam_beta2,
@@ -385,21 +386,20 @@ class Conv(TrainableLayer):
         return {
             'F': self.F,
             'bias': self.bias,
-        }
-    
-    def get_optimizer_state(self):
-        return {
+
             'S_F': self.S_F,
             'V_F': self.V_F,
             'S_bias': self.S_bias,
             'V_bias': self.V_bias,
         }
+    
     def set_config(self, config:dict):
         self.filter_num = config['filter_num']
         self.filter_size = config['filter_size']
         self.filter_channel = config['filter_channel']
         self.stride = config['stride']
     
+        self.learning_rate = config['learning_rate']
         self._Adam = config['_Adam']
         self.Adam_beta1 = config['Adam_beta1']
         self.Adam_beta2 = config['Adam_beta2']
@@ -408,11 +408,11 @@ class Conv(TrainableLayer):
     def set_weights(self, weights:dict):
         self.F = weights['F']
         self.bias = weights['bias']
-    def set_optimizer_state(self, optimizer_state:dict):
-        self.S_F = optimizer_state['S_F']
-        self.V_F = optimizer_state['V_F']
-        self.S_bias = optimizer_state['S_bias']
-        self.V_bias = optimizer_state['V_bias']
+        self.S_F = weights['S_F']
+        self.V_F = weights['V_F']
+        self.S_bias = weights['S_bias']
+        self.V_bias = weights['V_bias']
+       
         
     def forward_prop(self, X:np.ndarray)->np.ndarray:
         ''' 
@@ -519,14 +519,15 @@ class BatchNorm(TrainableLayer):
         self.running_var = None
         self.momentum = momentum
 
-        self.S_gamma = np.zeros_like(self.gamma)
-        self.V_gamma = np.zeros_like(self.gamma)
-        self.S_beta = np.zeros_like(self.beta)
-        self.V_beta = np.zeros_like(self.beta)
+        self.S_gamma = None
+        self.V_gamma = None
+        self.S_beta = None
+        self.V_beta = None
         
     def get_config(self):
         return {
             'type': 'BatchNorm',
+
             '_Adam': self._Adam,
             'Adam_beta1': self.Adam_beta1,
             'Adam_beta2': self.Adam_beta2,
@@ -541,14 +542,13 @@ class BatchNorm(TrainableLayer):
             # 保存推理用的统计量
             'running_mean': self.running_mean,
             'running_var': self.running_var,
-        }
-    def get_optimizer_state(self):
-        return {
+            
             'S_gamma': self.S_gamma,
             'V_gamma': self.V_gamma,
             'S_beta': self.S_beta,
             'V_beta': self.V_beta,
         }
+
     def set_config(self, config:dict):
         self._Adam = config['_Adam']
         self.Adam_beta1 = config['Adam_beta1']
@@ -562,12 +562,13 @@ class BatchNorm(TrainableLayer):
         self.beta = weights.get('beta', self.beta)
         self.running_mean = weights.get('running_mean', self.running_mean)
         self.running_var = weights.get('running_var', self.running_var)
-    def set_optimizer_state(self, optimizer_state:dict):
-        self.S_gamma = optimizer_state['S_gamma']
-        self.V_gamma = optimizer_state['V_gamma']
-        self.S_beta = optimizer_state['S_beta']
-        self.V_beta = optimizer_state['V_beta']
 
+        self.S_gamma = weights.get('S_gamma', self.S_gamma)
+        self.V_gamma = weights.get('V_gamma', self.V_gamma)
+        self.S_beta = weights.get('S_beta', self.S_beta)
+        self.V_beta = weights.get('V_beta', self.V_beta)
+
+        
     def forward_prop(self, Z:np.ndarray, training:bool=True)->np.ndarray:
         # if not training:
         #     return Z
@@ -583,9 +584,12 @@ class BatchNorm(TrainableLayer):
             
         if self.gamma is None:
             self.gamma = np.ones(self.input_shape)
+            self.S_gamma = np.zeros_like(self.gamma)
+            self.V_gamma = np.zeros_like(self.gamma)
         if self.beta is None:
             self.beta = np.zeros(self.input_shape)
-
+            self.S_beta = np.zeros_like(self.beta)
+            self.V_beta = np.zeros_like(self.beta)
         # 初始化 running statistics
         if self.running_mean is None:
             self.running_mean = np.zeros(self.input_shape)
@@ -680,16 +684,10 @@ class Activation(layer):
             'type': 'Activation',
             'activation': self.activation
         }
-    def get_weights(self):
-        pass
-    def get_optimizer_state(self):
-        pass
+
     def set_config(self, config:dict):
         self.activation = config['activation']
-    def set_weights(self, weights:dict):
-        pass
-    def set_optimizer_state(self, optimizer_state:dict):
-        pass
+
     
     @staticmethod
     def sigmoid(X:np.ndarray)->np.ndarray:
@@ -765,19 +763,15 @@ class Pooling(layer):# check
             'pool_type': self.pool_type,
             'same_padding': self.same_padding
         }
-    def get_weights(self):
-        pass
-    def get_optimizer_state(self):
-        pass
+
+
     def set_config(self, config:dict):
         self.stride = config['stride']
         self.pool_size = config['pool_size']
         self.pool_type = config['pool_type']
         self.same_padding = config['same_padding']
-    def set_weights(self, weights:dict):
-        pass
-    def set_optimizer_state(self, optimizer_state:dict):
-        pass
+
+
 
     def forward_prop(self,A:np.ndarray)->np.ndarray:
         """
@@ -918,7 +912,7 @@ class FC(layer): # fully connected layer
     def __init__(self,output_size,
                 _Adam = 0, Adam_beta1=0.9, Adam_beta2=0.999, epsilon=1e-8,
                 learning_rate=0.001):
-        # Adam optimizer        
+        # Adam hyperparam        
         TrainableLayer.__init__(self, learning_rate=learning_rate, _Adam=_Adam, Adam_beta1=Adam_beta1, Adam_beta2=Adam_beta2, epsilon=epsilon)
         self.input_size = None # default None, will be set in forward_prop
         self.output_size = output_size
@@ -930,8 +924,7 @@ class FC(layer): # fully connected layer
         # bias shape (1, output_size) to broadcast with (output_size, N)
         self.b = np.zeros((1, output_size))
 
-        
-        
+
         self.S_W = None  # Will be initialized when W is created
         self.V_W = None
         self.S_b = np.zeros_like(self.b)
@@ -941,29 +934,38 @@ class FC(layer): # fully connected layer
         return {
             'type': 'FC',
             'output_size': self.output_size,
+            '_Adam': self._Adam,
+            'Adam_beta1': self.Adam_beta1,
+            'Adam_beta2': self.Adam_beta2,
+            'epsilon': self.epsilon,
         }
     def get_weights(self):
         return {
             'W': self.W,
             'b': self.b,
-        }
-    def get_optimizer_state(self):
-        return {
+
             'S_W': self.S_W,
             'V_W': self.V_W,
             'S_b': self.S_b,
             'V_b': self.V_b,
         }
+
     def set_config(self, config:dict):
         self.output_size = config['output_size']
+        self.learning_rate = config['learning_rate']
+        self._Adam = config['_Adam']
+        self.Adam_beta1 = config['Adam_beta1']
+        self.Adam_beta2 = config['Adam_beta2']
+        self.epsilon = config['epsilon']        
     def set_weights(self, weights:dict):
         self.W = weights['W']
         self.b = weights['b']
-    def set_optimizer_state(self, optimizer_state:dict):
-        self.S_W = optimizer_state['S_W']
-        self.V_W = optimizer_state['V_W']
-        self.S_b = optimizer_state['S_b']
-        self.V_b = optimizer_state['V_b']
+        self.S_W = weights['S_W']
+        self.V_W = weights['V_W']
+        self.S_b = weights['S_b']
+        self.V_b = weights['V_b']
+
+
 
 
     def modified_hyperparam(self, learning_rate:float=0.001,
@@ -1050,16 +1052,12 @@ class Dropout(layer):
             'type': 'Dropout',
             'drop_rate': self.drop_rate
         }
-    def get_weights(self):
-        return None
-    def get_optimizer_state(self):
-        return None
+ 
+    
     def set_config(self, config:dict):
         self.drop_rate = config['drop_rate']
-    def set_weights(self, weights:dict):
-        pass
-    def set_optimizer_state(self, optimizer_state:dict):
-        pass
+ 
+
 
 class UpSampling(layer):# 这里采用双线性实现
     def __init__(self, target_shape:tuple, mode:str='bilinear'):
@@ -1200,15 +1198,13 @@ class UpSampling(layer):# 这里采用双线性实现
         }
     def get_weights(self):
         return None
-    def get_optimizer_state(self):
-        return None
+
     def set_config(self, config:dict):
         self.target_shape = config['target_shape']
         self.mode = config['mode']
     def set_weights(self, weights:dict):
         pass
-    def set_optimizer_state(self, optimizer_state:dict):
-        pass
+ 
 
 # Residual Block
 # 因为使用矩阵运算处理维度容易导致矩阵过大，内存无法处理这么大的矩阵，必须使用1*1卷积
@@ -1281,11 +1277,11 @@ class ResBlock(TrainableLayer):
                     else:
                         if self.FC_proj is None:
                             self.FC_proj = FC(output_size = self.target_shape[1],_Adam = self._Adam, Adam_beta1 = self.Adam_beta1, Adam_beta2 = self.Adam_beta2, epsilon = self.epsilon, learning_rate = self.learning_rate)
-                        out += self.FC_proj.forward_prop(out)
+                        out += self.FC_proj.forward_prop(X)
                 elif len(self.src_shape) == 4 and len(self.target_shape) == 2: # Conv -> FC
                     if self.FC_proj is None:
                         self.FC_proj = FC(output_size = self.target_shape[1],_Adam = self._Adam, Adam_beta1 = self.Adam_beta1, Adam_beta2 = self.Adam_beta2, epsilon = self.epsilon, learning_rate = self.learning_rate)
-                    out += self.FC_proj.forward_prop(out)
+                    out += self.FC_proj.forward_prop(X)
                 else:
                     raise ValueError(f"Unsupported target shape: {self.target_shape}")
         return out
@@ -1295,17 +1291,16 @@ class ResBlock(TrainableLayer):
         for _ in self.target_shape[1:]:
             targ_size *= _
         for i in range(len(self.Layers)-1,-1,-1):
-            d_Z = self.Layers[i].backward_prop(d_Z)
-            # 怎么知道.T运算就是把 （in_1*in_2,out_1*out_2）转成（out_1*out_2,in_1*in_2）而不是 （out_2*out_1,in_2*in_1）
+            
             if i == self.connected_layer:
                 if len(self.src_shape) == 4 and len(self.target_shape) == 4:
                     if self.src_shape == self.target_shape:
                         connected_dZ = d_Z # 1 * d_z
                     else:
-                        tmp = d_Z
+                        connected_dZ = self.Conv_proj.backward_prop(d_Z)
                         if (self.src_shape[2] < self.target_shape[2] or self.src_shape[3] < self.target_shape[3]):
-                            tmp = self.UpSampling_proj.backward_prop(tmp)
-                        connected_dZ = self.Conv_proj.backward_prop(tmp)
+                            connected_dZ = self.UpSampling_proj.backward_prop(connected_dZ)
+                        
                 elif len(self.src_shape) == 2 and len(self.target_shape) == 2: # FC -> FC
                     if self.src_shape == self.target_shape:
                         connected_dZ = d_Z # 1 * d_z
@@ -1315,7 +1310,7 @@ class ResBlock(TrainableLayer):
                     connected_dZ = self.FC_proj.backward_prop(d_Z)
                 else:
                     raise ValueError(f"Unsupported target shape: {self.target_shape}")           
-            
+            d_Z = self.Layers[i].backward_prop(d_Z)
         d_X = connected_dZ + d_Z
         return d_X
 
@@ -1327,6 +1322,12 @@ class ResBlock(TrainableLayer):
             'connected_layer': self.connected_layer,
             # 'src_shape': self.src_shape,
             # 'target_shape': self.target_shape,   
+            'learning_rate': self.learning_rate,
+            '_Adam': self._Adam,
+            'Adam_beta1': self.Adam_beta1,
+            'Adam_beta2': self.Adam_beta2,
+            'epsilon': self.epsilon
+
         }
     def get_weights(self):
         return {
@@ -1335,26 +1336,18 @@ class ResBlock(TrainableLayer):
             'fc_proj': self.FC_proj.get_weights() if self.FC_proj is not None else None,
             'Layers': [layer.get_weights() for layer in self.Layers]
         }
-    def get_optimizer_state(self):
-        return {
-            # 不可先get 后 None ，因为语句语法会先执行空的get导致无效错误
-            'up_sampling_proj': None if self.UpSampling_proj is None else self.UpSampling_proj.get_optimizer_state(),
-            'conv_proj': None if self.Conv_proj is None else self.Conv_proj.get_optimizer_state(),
-            'fc_proj': None if self.FC_proj is None else self.FC_proj.get_optimizer_state(),
-            'Layers': [layer.get_optimizer_state() for layer in self.Layers],
-
-            'learning_rate': self.learning_rate,
-            '_Adam': self._Adam,
-            'Adam_beta1': self.Adam_beta1,
-            'Adam_beta2': self.Adam_beta2,
-            'epsilon': self.epsilon
-        }
+   
     def set_config(self, config:dict):
         self.Layers = [layer.set_config(layer_config) for layer_config in config['Layers']]
         self.connected_layer = config['connected_layer']
         # self.src_shape = config['src_shape']
         # self.target_shape = config['target_shape']
-
+       
+        self.learning_rate = config['learning_rate']
+        self._Adam = config['_Adam']
+        self.Adam_beta1 = config['Adam_beta1']
+        self.Adam_beta2 = config['Adam_beta2']
+        self.epsilon = config['epsilon']
         
     def set_weights(self, weights:dict):
         if weights.get('up_sampling_proj') is not None and self.UpSampling_proj is not None:
@@ -1373,23 +1366,6 @@ class ResBlock(TrainableLayer):
             for layer, weight in zip(self.Layers, layers_weights):
                 layer.set_weights(weight)
 
-    def set_optimizer_state(self, optimizer_states:dict):
-        self.learning_rate = optimizer_states.get('learning_rate', self.learning_rate)
-        self._Adam = optimizer_states.get('_Adam', self._Adam)
-        self.Adam_beta1 = optimizer_states.get('Adam_beta1', self.Adam_beta1)
-        self.Adam_beta2 = optimizer_states.get('Adam_beta2', self.Adam_beta2)
-        self.epsilon = optimizer_states.get('epsilon', self.epsilon)
-
-        if optimizer_states.get('up_sampling_proj') is not None and self.UpSampling_proj is not None:
-            self.UpSampling_proj.set_optimizer_state(optimizer_states['up_sampling_proj'])
-        if optimizer_states.get('conv_proj') is not None and self.Conv_proj is not None:
-            self.Conv_proj.set_optimizer_state(optimizer_states['conv_proj'])
-        if optimizer_states.get('fc_proj') is not None and self.FC_proj is not None:
-            self.FC_proj.set_optimizer_state(optimizer_states['fc_proj'])
-            
-        if 'Layers' in optimizer_states:
-            for layer, state in zip(self.Layers, optimizer_states['Layers']):
-                layer.set_optimizer_state(state)
 
     
 class CNN:
@@ -1420,7 +1396,8 @@ class CNN:
         layer_configs = [layer.get_config() for layer in self.layers]
 
         params = {}
-        params['layer_configs'] = np.array([json.dumps(layer_configs)]) 
+        # Save configs as object array (Pickle) instead of JSON string
+        params['layer_configs'] = np.array(layer_configs, dtype=object)
 
         
         for i, layer in enumerate(self.layers):
@@ -1429,16 +1406,13 @@ class CNN:
                 for key, val in weights.items():
                     params[f'layer_{i}_weights_{key}'] = val
             
-            opt_state = layer.get_optimizer_state()
-            if opt_state:
-                for key, val in opt_state.items():
-                    params[f'layer_{i}_optimizer_{key}'] = val
 
-        params['training_state'] = np.array([json.dumps({
+        # Save training state as object
+        params['training_state'] = np.array({
             'learning_rate': self.learning_rate,
             'epoch_start': self.epoch_start,
             'cost_history': self.cost_history
-        })])
+        }, dtype=object)
 
         np.savez_compressed(filepath, **params)
         print(f"Model saved to {filepath}")
@@ -1467,30 +1441,43 @@ class CNN:
             print("Error: No layer configurations found in .npz file.")
             return None
             
-        # Extract JSON string from numpy array
-        config_str = str(data['layer_configs'][0])
-        layer_configs = json.loads(config_str)
+        # Load layer configs (object array)
+        try:
+            layer_configs = data['layer_configs']
+            if layer_configs.ndim == 0:
+                layer_configs = layer_configs.item()
+            elif layer_configs.dtype == object:
+                layer_configs = layer_configs.tolist()
+        except Exception:
+            # Fallback for old models (if any)
+            try:
+                import json
+                config_str = str(data['layer_configs'][0])
+                layer_configs = json.loads(config_str)
+            except ImportError:
+                print("Error: Could not load layer_configs and json module not available.")
+                return None
         
         # Pre-process data keys to avoid O(N*M) complexity
-        # Group data by layer index and type (weights/optimizer)
+        # Group data by layer index and type (weights/hyperparam)
         layer_data = {}
         for key in data.files:
-            # key format: layer_{i}_weights_{name} or layer_{i}_optimizer_{name}
+            # key format: layer_{i}_weights_{name} or layer_{i}_hyperparam_{name}
             if not key.startswith('layer_'):
                 continue
                 
             parts = key.split('_')
-            if len(parts) < 4: continue # Not a weight/optimizer key
+            if len(parts) < 4: continue # Not a weight/hyperparam key
             
             try:
                 layer_idx = int(parts[1])
-                data_type = parts[2] # 'weights' or 'optimizer'
+                data_type = parts[2] # 'weights' or 'hyperparam'
                 param_name = "_".join(parts[3:]) # handle names with underscores if any
                 
                 if layer_idx not in layer_data:
-                    layer_data[layer_idx] = {'weights': {}, 'optimizer': {}}
+                    layer_data[layer_idx] = {'weights': {}, 'hyperparam': {}}
                 
-                if data_type in ['weights', 'optimizer']:
+                if data_type in ['weights', 'hyperparam']:
                     val = data[key]
                     # Handle 0-D object arrays (common when saving lists/dicts with numpy)
                     if val.ndim == 0 and val.dtype == 'O':
@@ -1532,13 +1519,13 @@ class CNN:
             layer = _create_layer(config)
             if layer is None: continue
             
-            # Efficiently restore weights and optimizer state
+            # Efficiently restore weights and hyperparam state
             if i in layer_data:
                 if layer_data[i]['weights']:
                     layer.set_weights(layer_data[i]['weights'])
                 
-                if layer_data[i]['optimizer']:
-                    layer.set_optimizer_state(layer_data[i]['optimizer'])
+                if layer_data[i]['hyperparam']:
+                    layer.set_hyperparams(layer_data[i]['hyperparam'])
             
             layers.append(layer)
         
@@ -1548,8 +1535,22 @@ class CNN:
         # Restore global training state if available
         if 'training_state' in data:
             try:
-                state_str = str(data['training_state'][0])
-                state = json.loads(state_str)
+                state_val = data['training_state']
+                if state_val.ndim == 0:
+                    state = state_val.item()
+                else:
+                    # Handle case where it might be wrapped
+                    state = state_val.item() if state_val.size == 1 else state_val
+                
+                # Check if it's old JSON format (string)
+                if isinstance(state, (str, np.str_)):
+                     import json
+                     state = json.loads(str(state))
+                elif hasattr(state, 'item') and isinstance(state.item(), (str, np.str_)):
+                     # Sometimes wrapped in array scalar of string
+                     import json
+                     state = json.loads(str(state.item()))
+
                 cnn.learning_rate = state.get('learning_rate', 0.001)
                 cnn.epoch_start = state.get('epoch_start', 0)
                 cnn.cost_history = state.get('cost_history', [])
