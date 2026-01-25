@@ -597,20 +597,17 @@ class BatchNorm(TrainableLayer):
             self.running_var = np.ones(self.input_shape)
 
         if training:
-            # 训练模式：使用当前 batch 统计量，并更新 running_mean / running_var
-            # print(f"DEBUG BatchNorm.forward_prop: About to compute mean, Z.shape={Z.shape}")
-            # sys.stdout.flush()
-            self.mu = Z.mean(axis=0, keepdims=True)
-            # print(f"DEBUG BatchNorm.forward_prop: Mean completed, mu.shape={self.mu.shape}")
-            # sys.stdout.flush()
-            # print(f"DEBUG BatchNorm.forward_prop: About to compute variance")
-            # sys.stdout.flush()
-            self.sigma = np.var(Z, axis=0, keepdims=True)
-            # print(f"DEBUG BatchNorm.forward_prop: Variance completed, sigma.shape={self.sigma.shape}")
-            # sys.stdout.flush()
 
-            # print(f"DEBUG BatchNorm.forward_prop: About to update running statistics")
-            # sys.stdout.flush()
+            if training:
+                if Z.ndim == 4:
+                    # Spatial BN for CNN: (N, C, H, W) -> mean over (N, H, W)
+                    self.mu = Z.mean(axis=(0, 2, 3), keepdims=True)
+                    self.sigma = np.var(Z, axis=(0, 2, 3), keepdims=True)
+                else:
+                    # Standard BN for FC: (N, D) -> mean over (N)
+                    self.mu = Z.mean(axis=0, keepdims=True)
+                    self.sigma = np.var(Z, axis=0, keepdims=True)
+
             self.running_mean = self.momentum * self.running_mean + (1 - self.momentum) * self.mu
             self.running_var = self.momentum * self.running_var + (1 - self.momentum) * self.sigma
             # print(f"DEBUG BatchNorm.forward_prop: Running statistics updated")
@@ -645,7 +642,10 @@ class BatchNorm(TrainableLayer):
     
     def backward_prop(self, d_y_tilde:np.ndarray)->np.ndarray:
         # Batch dimension is always axis 0 now
-        axis = 0
+        if d_y_tilde.ndim == 4:
+            axis = (0, 2, 3)
+        else:
+            axis = 0
         d_gamma = (d_y_tilde * self.y_hat).sum(axis=axis,keepdims=True) 
         d_beta = d_y_tilde.sum(axis=axis,keepdims=True)
 

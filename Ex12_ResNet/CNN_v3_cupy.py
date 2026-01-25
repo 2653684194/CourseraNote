@@ -622,10 +622,14 @@ class BatchNorm(TrainableLayer):
             self.running_var = xp.ones(self.input_shape)
 
         if training:
-
-            self.mu = Z.mean(axis=0, keepdims=True)
-          
-            self.sigma = xp.var(Z, axis=0, keepdims=True)
+            if Z.ndim == 4:
+                # Spatial BN for CNN: (N, C, H, W) -> mean over (N, H, W)
+                self.mu = Z.mean(axis=(0, 2, 3), keepdims=True)
+                self.sigma = xp.var(Z, axis=(0, 2, 3), keepdims=True)
+            else:
+                # Standard BN for FC: (N, D) -> mean over (N)
+                self.mu = Z.mean(axis=0, keepdims=True)
+                self.sigma = xp.var(Z, axis=0, keepdims=True)
           
             self.running_mean = self.momentum * self.running_mean + (1 - self.momentum) * self.mu
             self.running_var = self.momentum * self.running_var + (1 - self.momentum) * self.sigma
@@ -646,7 +650,10 @@ class BatchNorm(TrainableLayer):
     
     def backward_prop(self, d_y_tilde:xp.ndarray)->xp.ndarray:
         # Batch dimension is always axis 0 now
-        axis = 0
+        if d_y_tilde.ndim == 4:
+            axis = (0, 2, 3)
+        else:
+            axis = 0
         d_gamma = (d_y_tilde * self.y_hat).sum(axis=axis,keepdims=True) 
         d_beta = d_y_tilde.sum(axis=axis,keepdims=True)
 
@@ -1354,7 +1361,7 @@ class CNN:
         params['training_state'] = np.array({
             'learning_rate': self.learning_rate,
             'epoch_start': self.epoch_start,
-            'cost_history': self.cost_history
+            'cost_history': np.array(self.cost_history, dtype=object)
         }, dtype=object)
 
         np.savez_compressed(filepath, **params)
@@ -1478,25 +1485,30 @@ class CNN:
         # Restore global training state if available
         if 'training_state' in data:
             try:
-                state_val = data['training_state']
-                if state_val.ndim == 0:
-                    state = state_val.item()
-                else:
-                    # Handle case where it might be wrapped
-                    state = state_val.item() if state_val.size == 1 else state_val
+                state_val = data['training_state'].item()
+                # if state_val.ndim == 0:
+                #     state = state_val.item()
+                # else:
+                #     # Handle case where it might be wrapped
+                #     state = state_val.item() if state_val.size == 1 else state_val
                 
-                # Check if it's old JSON format (string)
-                if isinstance(state, (str, xp.str_)):
-                     import json
-                     state = json.loads(str(state))
-                elif hasattr(state, 'item') and isinstance(state.item(), (str, xp.str_)):
-                     # Sometimes wrapped in array scalar of string
-                     import json
-                     state = json.loads(str(state.item()))
+                # # Check if it's old JSON format (string)
+                # if isinstance(state, (str, xp.str_)):
+                #      import json
+                #      state = json.loads(str(state))
+                # elif hasattr(state, 'item') and isinstance(state.item(), (str, xp.str_)):
+                #      # Sometimes wrapped in array scalar of string
+                #      import json
+                #      state = json.loads(str(state.item()))
 
-                cnn.learning_rate = state.get('learning_rate', 0.001)
-                cnn.epoch_start = state.get('epoch_start', 0)
-                cnn.cost_history = state.get('cost_history', [])
+                # cnn.learning_rate = state_val.get('learning_rate', 0.001)
+                # cnn.epoch_start = state_val.get('epoch_start', 0)
+                # cnn.cost_history = state_val.get('cost_history', [])
+                # print(f"Resuming training from epoch {cnn.epoch_start} with LR={cnn.learning_rate}")
+ 
+                cnn.learning_rate = state_val['learning_rate']
+                cnn.epoch_start = state_val['epoch_start']
+                cnn.cost_history = state_val['cost_history']
                 print(f"Resuming training from epoch {cnn.epoch_start} with LR={cnn.learning_rate}")
             except Exception as e:
                 print(f"Warning: Could not load training state: {e}")
@@ -1545,7 +1557,7 @@ class CNN:
         # Clip to prevent log(0)
         A_out = to_cpu(A_out)
         Y_flat = to_cpu(Y_flat)
-        
+
         A_out = np.clip(A_out, 1e-15, 1.0 - 1e-15)
         cost = -np.mean(np.log(A_out[np.arange(Y_flat.shape[0]), Y_flat]))
         return cost
@@ -1566,6 +1578,8 @@ class CNN:
         
         print(f"Training with {N} samples, batch_size={batch_size}, num_batches={num_batches}")
         epoch_accumulated = 0
+
+        self.cost_history = self.cost_history.tolist()
         try:
             for i in range(epochs):
                 epoch_accumulated += 1
@@ -1631,6 +1645,7 @@ class CNN:
                 # Average cost for the epoch
                 if num_batches > 0:
                     epoch_cost /= num_batches
+                    
                     self.cost_history.append(epoch_cost)
                     # 不适用学习率震荡更新， 依赖Adam优化器， 或者用learning rate decay
                     self.learning_rate *= 0.99
@@ -1638,7 +1653,7 @@ class CNN:
 
                 if print_cost:
                     print(f'Cost after epoch {i}: {epoch_cost:.6f}')
-                
+
 
                 # Save model at end of epoch
                 if save_path:
@@ -1661,6 +1676,7 @@ class CNN:
         if save_path:
             print(f"Saving model to {save_path}...")
             self.save_model(save_path)
+        self.cost_history = np.array(self.cost_history, dtype=object)
         return to_cpu(self.cost_history)
         
     def predict(self, X:np.ndarray, batch_size:int=32)->np.ndarray:
