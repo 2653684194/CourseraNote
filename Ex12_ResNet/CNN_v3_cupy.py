@@ -1579,7 +1579,7 @@ class CNN:
         print(f"Training with {N} samples, batch_size={batch_size}, num_batches={num_batches}")
         epoch_accumulated = 0
 
-        self.cost_history = self.cost_history.tolist()
+        # self.cost_history = self.cost_history.tolist()
         try:
             for i in range(epochs):
                 epoch_accumulated += 1
@@ -1646,7 +1646,9 @@ class CNN:
                 if num_batches > 0:
                     epoch_cost /= num_batches
                     
+                    self.cost_history = self.cost_history.tolist()
                     self.cost_history.append(epoch_cost)
+                    self.cost_history = np.array(self.cost_history)
                     # 不适用学习率震荡更新， 依赖Adam优化器， 或者用learning rate decay
                     self.learning_rate *= 0.99
                     self.unified_hyperparam(learning_rate=self.learning_rate)
