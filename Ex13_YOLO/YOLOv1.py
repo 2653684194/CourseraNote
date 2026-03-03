@@ -138,7 +138,7 @@ class YOLOv1:
         """Save the model parameters to a file."""
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-        layer_configs = [layer.getconfig() for layer in self.layers]
+        layer_configs = [layer.get_config() for layer in self.layers]
 
         params = {}
         params['layer_configs'] = np.array(layer_configs, dtype=object)
