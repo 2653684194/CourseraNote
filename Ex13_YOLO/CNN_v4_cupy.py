@@ -375,7 +375,7 @@ def calculate_dynamic_padding(input_size: int, filter_size: int, stride: int,
 
 
 class layer:
-    def forward_prop(self, X: xp.ndarray) -> xp.ndarray:
+    def forward_prop(self, X: xp.ndarray, training:bool=True) -> xp.ndarray:
         pass
     def backward_prop(self, dY: xp.ndarray) -> xp.ndarray:
         pass
@@ -509,7 +509,17 @@ class Conv(TrainableLayer):
         self.X_col = img2col(X,filter_size=self.filter_size,stride=self.stride,padding=self.padding)
         self.col_shape = self.X_col.shape # 每次forward_prop都要更新col_shape
         self.X_col = self.X_col.reshape(self.col_shape[0]*self.col_shape[1]*self.col_shape[2],-1) # (N * h_out * w_out, X_C^{l-1} * filter_size^{l} * filter_size^{l})
-        
+
+        # Debug/validation: ensure matmul inner dimensions match
+        if self.X_col.shape[1] != self.F.shape[0]:
+            raise ValueError(
+                f"Conv.forward_prop shape mismatch: "
+                f"X.shape={X.shape}, X_col.shape={self.X_col.shape}, "
+                f"F.shape={self.F.shape}, "
+                f"expected inner dim={self.F.shape[0]} (= filter_channel * filter_size^2), "
+                f"got {self.X_col.shape[1]}"
+            )
+
         Z = self.X_col @ self.F + self.bias # (N * Z_H^{l} * Z_W^{l}, f_n^{l})
         Z = Z.reshape(self.col_shape[0],self.col_shape[1],self.col_shape[2],self.filter_num)# (N, Z_H^{l}, Z_W^{l}, f_n^{l})
         Z = Z.transpose(0,3,1,2)# (N, f_n^{l}, Z_H^{l}, Z_W^{l})
@@ -736,6 +746,8 @@ class Activation(layer):
         if self.activation == 'relu':
             self.Map = Z > 0
             return Z * self.Map
+        elif self.activation == 'leaky_relu':
+            return xp.where(Z > 0, Z, 0.01 * Z)
         elif self.activation == 'sigmoid':
             return self.sigmoid(Z)
         elif self.activation == 'softmax':
@@ -756,6 +768,8 @@ class Activation(layer):
 
         if self.activation == 'relu':
             d_Z = d_A * self.Map
+        elif self.activation == 'leaky_relu':
+            d_Z = xp.where(self.Z > 0, d_A, 0.01 * d_A)
         elif self.activation == 'sigmoid':
             sigmoid_z = self.sigmoid(self.Z)
             d_Z = sigmoid_z * (1 - sigmoid_z) * d_A
@@ -1343,7 +1357,7 @@ class CNN:
                 learning_rate:float=0.001,
                 _Adam:bool=False,beta1:float=0.9,beta2:float=0.999,epsilon:float=1e-8):
         self.layers = layers
-        self.forward_params = []
+        self.out = None
 
         self.len = len(layers)
 
@@ -1545,28 +1559,26 @@ class CNN:
         for layer in self.layers:
             layer.modified_hyperparam(learning_rate, _Adam, beta1, beta2, epsilon)
         
-    def forward(self,X:xp.ndarray,Y:xp.ndarray=None, training:bool=True)->xp.ndarray:
-        # self.forward_params = to_gpu(self.forward_params)
-        self.forward_params = [X]  # Reset forward params for each forward pass
-        
+    def forward(self,X:xp.ndarray, training:bool=True)->xp.ndarray:
+        self.out = X
         # import sys
         for i, layer in enumerate(self.layers):
-            layer_type = type(layer).__name__
+            # layer_type = type(layer).__name__ 好像没有用
            
             try:
-                out = layer.forward_prop(self.forward_params[-1], training=training)
+                self.out = layer.forward_prop(self.out, training=training)
             except TypeError:
                 # 不支持 training 参数的层（Conv / FC / Pooling / Activation）
-                out = layer.forward_prop(self.forward_params[-1])
-            self.forward_params.append(out)
+                self.out = layer.forward_prop(self.out)
+          
         if training == False:
-            return to_cpu(self.forward_params[-1])
+            return to_cpu(self.out)
         else:
-            return self.forward_params[-1]
+            return self.out
     
     def calculate_cost(self, Y:xp.ndarray)->float:
         """Calculate cross-entropy cost"""
-        A_out = self.forward_params[-1]
+        A_out = self.out
         # Handle different output shapes
         if len(A_out.shape) == 4:  # (N, C, H, W)
             A_out = A_out.reshape(A_out.shape[0], -1)
@@ -1621,7 +1633,7 @@ class CNN:
                     batch_size_actual = end_idx - start_idx
                     
                     # Clear the params
-                    self.forward_params = []
+                    self.out = None
 
                     # Forward pass
                     self.forward(X_batch)
@@ -1635,7 +1647,7 @@ class CNN:
                     
                     # Calculate gradient for backward pass
                     # For softmax cross-entropy: dA = (A - Y_onehot) / batch_size
-                    y_hat = self.forward_params[-1]
+                    y_hat = self.out
                     
                     # Handle different output shapes - convert to (N, D_out) format, set num_classes
                     if len(y_hat.shape) == 4:  # (N, C, H, W)
