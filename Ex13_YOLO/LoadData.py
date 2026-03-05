@@ -16,7 +16,7 @@ S = (10, 10)
 PRE_IMG_SIZE = (1080, 1920)
 
 # img size
-IMG_SIZE = (640, 640)
+IMG_SIZE = (448, 448)
 
 # read size of folder
 def read_folder_size(path:str) -> int:

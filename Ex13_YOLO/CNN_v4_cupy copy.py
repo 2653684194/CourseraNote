@@ -1059,10 +1059,10 @@ class Sampling(layer):# 放弃Upsampling, 改用宽高维度分别进行采样
         self.w_bl = None
         self.w_br = None
 
-        self.top = None
-        self.left = None
-        self.bottom = None
-        self.right = None
+        self.idx_tl = None
+        self.idx_tr = None
+        self.idx_bl = None
+        self.idx_br = None
 
 
     def get_interp_positions(self,H_src, W_src, H_targ, W_targ, align_corners=True):
@@ -1080,7 +1080,7 @@ class Sampling(layer):# 放弃Upsampling, 改用宽高维度分别进行采样
         
         # 计算映射比例
         if align_corners:# 意思是只在四个元素之内插值，边界位置元素之外不插值 
-            scale_h = (H_src - 1) / (H_targ - 1) if H_targ > 1 else 0 # 处理targ为0
+            scale_h = (H_src - 1) / (H_targ - 1) if H_targ > 1 else 0
             scale_w = (W_src - 1) / (W_targ - 1) if W_targ > 1 else 0
         else:
             scale_h = H_src / H_targ
@@ -1098,188 +1098,83 @@ class Sampling(layer):# 放弃Upsampling, 改用宽高维度分别进行采样
         return: (N, C, H_targ, W_targ)
         """
         if len(A.shape)==4:
-        
             self.src_shape = A.shape
             N,C,H_src,W_src=self.src_shape
             _,_,H_targ,W_targ=self.target_shape
             if self.mode == 'bilinear': # 双线性插值
                 if self.h_in_grid is None or self.w_in_grid is None:
                     self.h_in_grid, self.w_in_grid = self.get_interp_positions(H_src, W_src, H_targ, W_targ)
-                self.top = self.h_in_grid.astype(int) # (H_targ, W_targ)
-                self.left = self.w_in_grid.astype(int) # (H_targ, W_targ)
-                self.bottom = xp.minimum(self.h_in_grid+1, H_src-1).astype(int) # (H_targ, W_targ)
-                self.right = xp.minimum(self.w_in_grid+1, W_src-1).astype(int) # (H_targ, W_targ)
-                h_in_grid_flt = self.h_in_grid - self.top
-                w_in_grid_flt = self.w_in_grid - self.left
+                h_in_grid_int = self.h_in_grid.astype(int)
+                w_in_grid_int = self.w_in_grid.astype(int)
+                h_in_grid_flt = self.h_in_grid - h_in_grid_int
+                w_in_grid_flt = self.w_in_grid - w_in_grid_int
                 h_in_grid_counter_flt = 1 - h_in_grid_flt
                 w_in_grid_counter_flt = 1 - w_in_grid_flt
-
-                self.w_tl = h_in_grid_counter_flt * w_in_grid_counter_flt # (H_targ, W_targ)
-                self.w_tr = h_in_grid_counter_flt * w_in_grid_flt # (H_targ, W_targ)
-                self.w_bl = h_in_grid_flt * w_in_grid_counter_flt # (H_targ, W_targ)
-                self.w_br = h_in_grid_flt * w_in_grid_flt # (H_targ, W_targ)
-
                 out = xp.zeros((N, C, H_targ, W_targ))
-                # 离某个点越近权重越大 # 这是一种高级索引写法
-                out += A[:,:,self.top,self.left] * self.w_tl # topleft
-                out += A[:,:,self.top,self.right] * self.w_tr # topright                
-                out += A[:,:,self.bottom,self.left] * self.w_bl # bottomleft
-                out += A[:,:,self.bottom,self.right] * self.w_br # bottomright
+                # 离某个点越近权重越大
+                out += A[:,:,h_in_grid_int,w_in_grid_int] * h_in_grid_counter_flt * w_in_grid_counter_flt
+                out += A[:,:,h_in_grid_int+1,w_in_grid_int] * h_in_grid_flt * w_in_grid_counter_flt
+                out += A[:,:,h_in_grid_int,w_in_grid_int+1] * h_in_grid_counter_flt * w_in_grid_flt
+                out += A[:,:,h_in_grid_int+1,w_in_grid_int+1] * h_in_grid_flt * w_in_grid_flt
                 return out
             else:
                 raise ValueError(f"Unsupported mode: {self.mode}")
         else:
             raise ValueError(f"Unsupported input shape: {A.shape}. Expected 4D input.")
-
-    def backward_prop(self, d_Z: xp.ndarray) -> xp.ndarray:
+    def backward_prop(self, d_Z:xp.ndarray)->xp.ndarray:
         """
-        更简洁的版本4实现
         d_Z: (N, C, H_targ, W_targ)
         return: (N, C, H_src, W_src)
         """
         N, C, H_targ, W_targ = d_Z.shape
-        H_src, W_src = self.src_shape[2:]
+        H_src, W_src = self.src_shape[2], self.src_shape[3]
         
-        # 初始化梯度
-        d_A = xp.zeros((N, C, H_src, W_src), dtype=d_Z.dtype)
-        
-        # 创建 batch 和 channel 的索引网格
-        n_idx = xp.arange(N).reshape(N, 1, 1, 1)
-        c_idx = xp.arange(C).reshape(1, C, 1, 1)
-        
-        # 四个角的配置
-        corners = [
-            (self.top, self.left, self.w_tl),
-            (self.top, self.right, self.w_tr),
-            (self.bottom, self.left, self.w_bl),
-            (self.bottom, self.right, self.w_br)
-        ]
-        
-        # 对每个角进行向量化累加
-        for h_idx, w_idx, weight in corners:
-            # 扩展坐标到 4D
-            h_4d = h_idx[None, None, :, :]
-            w_4d = w_idx[None, None, :, :]
-            w_full = weight[None, None, :, :]
+        num_pixels_out = H_targ * W_targ
+        num_pixels_in = H_src * W_src
+        num_channels = N * C        
+        if (self.w_tl==None or self.w_tr==None or self.w_bl==None or self.w_br==None):
+
+            h_floor_flat = xp.floor(self.h_in_grid).astype(int).reshape(-1,1) # (H_targ * W_targ, 1)
+            w_floor_flat = xp.floor(self.w_in_grid).astype(int).reshape(-1,1) # (H_targ * W_targ, 1)
             
-            # 使用广播创建完整的索引
-            h_full = xp.broadcast_to(h_4d, (N, C, H_targ, W_targ))
-            w_full = xp.broadcast_to(w_4d, (N, C, H_targ, W_targ))
+            h_ceil_flat = xp.minimum(h_floor_flat + 1, H_src - 1)
+            w_ceil_flat = xp.minimum(w_floor_flat + 1, W_src - 1)
             
-            # 🔴 直接使用多维索引的 add.at
-            xp.add.at(d_A, 
-                    (xp.broadcast_to(n_idx, (N, C, H_targ, W_targ)),
-                    xp.broadcast_to(c_idx, (N, C, H_targ, W_targ)),
-                    h_full,
-                    w_full),
-                    d_Z * w_full)
-        
-        return d_A
+            weight_h_flat = self.h_in_grid.reshape(-1,1) - h_floor_flat
+            weight_w_flat = self.w_in_grid.reshape(-1,1) - w_floor_flat
 
-    # def backward_prop(self, d_Z:xp.ndarray)->xp.ndarray:
-    #     """
-    #     版本2
-    #     d_Z: (N, C, H_targ, W_targ)
-    #     return: (N, C, H_src, W_src)
-    #     """
-    #     N,C,H_targ,W_targ = d_Z.shape
-    #     H_src, W_src = self.src_shape[2:] # (H_targ, W_targ)
+            self.w_tl = (1 - weight_h_flat) * (1 - weight_w_flat) # (H_targ * W_targ, 1)
+            self.w_tr = weight_h_flat * (1 - weight_w_flat) # (H_targ * W_targ, 1)
+            self.w_bl = (1 - weight_h_flat) * weight_w_flat # (H_targ * W_targ, 1)  
+            self.w_br = weight_h_flat * weight_w_flat # (H_targ * W_targ, 1)
 
-    #     # 展平向量以向量化加速add.at的计算
+            offset_tl = h_floor_flat * W_src + w_floor_flat # (H_targ * W_targ, 1)
+            offset_tr = h_floor_flat * W_src + w_ceil_flat # (H_targ * W_targ, 1)
+            offset_bl = h_ceil_flat * W_src + w_floor_flat # (H_targ * W_targ, 1)
+            offset_br = h_ceil_flat * W_src + w_ceil_flat # (H_targ * W_targ, 1)
 
-    #     print(d_Z.shape)
-    #     print(self.w_tl.shape)
-    #     # (N, C, H_targ, W_targ)
-    #     val_tl = d_Z[:,:,self.top,self.left] * self.w_tl # topleft
-    #     val_tr = d_Z[:,:,self.top,self.right] * self.w_tr # topright
-    #     val_bl = d_Z[:,:,self.bottom,self.left] * self.w_bl # bottomleft
-    #     val_br = d_Z[:,:,self.bottom,self.right] * self.w_br # bottomright
-    #     val_tl = val_tl.reshape(N*C,-1)
-    #     val_tr = val_tr.reshape(N*C,-1)
-    #     val_bl = val_bl.reshape(N*C,-1)
-    #     val_br = val_br.reshape(N*C,-1)
+            channel_offsets = xp.arange(num_channels)[:, None] * num_pixels_in # (N*C, 1)
 
-    #     # (1,H_targ*W_targ)
-    #     idx_tl = (self.top * W_src + self.left).reshape(1,-1)
-    #     idx_tr = (self.top * W_src + self.right).reshape(1,-1)
-    #     idx_bl = (self.bottom * W_src + self.left).reshape(1,-1)
-    #     idx_br = (self.bottom * W_src + self.right).reshape(1,-1)
-
-    #     # (N*C,1)
-    #     channel_offsets = xp.arange(N*C)[:, None] * H_src * W_src # (N*C, 1)
-
-    #     # broadcast add
-    #     idx_tl = channel_offsets + idx_tl
-    #     idx_tr = channel_offsets + idx_tr
-    #     idx_bl = channel_offsets + idx_bl
-    #     idx_br = channel_offsets + idx_br
-
-    #     d_A = xp.zeros((N*C,H_src*W_src))
-    #     print(d_A.shape,idx_tl.shape,val_tl.shape)
-    #     # print(xp.add.at(d_A, idx_tl, val_tl).shape)
-    #     xp.add.at(d_A, idx_tl, val_tl)
-    #     xp.add.at(d_A, idx_tr, val_tr)
-    #     xp.add.at(d_A, idx_bl, val_bl)
-    #     xp.add.at(d_A, idx_br, val_br)
-
-    #     return d_A.reshape(self.src_shape)
-
-        
-    # def backward_prop(self, d_Z:xp.ndarray)->xp.ndarray:
-    #     """
-    #     版本0
-    #     d_Z: (N, C, H_targ, W_targ)
-    #     return: (N, C, H_src, W_src)
-    #     """
-    #     N, C, H_targ, W_targ = d_Z.shape
-    #     H_src, W_src = self.src_shape[2], self.src_shape[3]
-        
-    #     num_pixels_out = H_targ * W_targ
-    #     num_pixels_in = H_src * W_src
-    #     num_channels = N * C        
-    #     if (self.w_tl==None or self.w_tr==None or self.w_bl==None or self.w_br==None):
-
-    #         h_floor_flat = xp.floor(self.h_in_grid).astype(int).reshape(-1,1) # (H_targ * W_targ, 1)
-    #         w_floor_flat = xp.floor(self.w_in_grid).astype(int).reshape(-1,1) # (H_targ * W_targ, 1)
-            
-    #         h_ceil_flat = xp.minimum(h_floor_flat + 1, H_src - 1)
-    #         w_ceil_flat = xp.minimum(w_floor_flat + 1, W_src - 1)
-            
-    #         weight_h_flat = self.h_in_grid.reshape(-1,1) - h_floor_flat
-    #         weight_w_flat = self.w_in_grid.reshape(-1,1) - w_floor_flat
-
-    #         self.w_tl = (1 - weight_h_flat) * (1 - weight_w_flat) # (H_targ * W_targ, 1)
-    #         self.w_tr = weight_h_flat * (1 - weight_w_flat) # (H_targ * W_targ, 1)
-    #         self.w_bl = (1 - weight_h_flat) * weight_w_flat # (H_targ * W_targ, 1)  
-    #         self.w_br = weight_h_flat * weight_w_flat # (H_targ * W_targ, 1)
-
-    #         offset_tl = h_floor_flat * W_src + w_floor_flat # (H_targ * W_targ, 1)
-    #         offset_tr = h_floor_flat * W_src + w_ceil_flat # (H_targ * W_targ, 1)
-    #         offset_bl = h_ceil_flat * W_src + w_floor_flat # (H_targ * W_targ, 1)
-    #         offset_br = h_ceil_flat * W_src + w_ceil_flat # (H_targ * W_targ, 1)
-
-    #         channel_offsets = xp.arange(num_channels)[:, None] * num_pixels_in # (N*C, 1)
-
-    #         self.idx_tl = (channel_offsets + offset_tl).flatten() # (N*C*H_targ*W_targ, 1)
-    #         self.idx_tr = (channel_offsets + offset_tr).flatten() # (N*C*H_targ*W_targ, 1)
-    #         self.idx_bl = (channel_offsets + offset_bl).flatten() # (N*C*H_targ*W_targ, 1)
-    #         self.idx_br = (channel_offsets + offset_br).flatten() # (N*C*H_targ*W_targ, 1)
+            self.idx_tl = (channel_offsets + offset_tl).flatten() # (N*C*H_targ*W_targ, 1)
+            self.idx_tr = (channel_offsets + offset_tr).flatten() # (N*C*H_targ*W_targ, 1)
+            self.idx_bl = (channel_offsets + offset_bl).flatten() # (N*C*H_targ*W_targ, 1)
+            self.idx_br = (channel_offsets + offset_br).flatten() # (N*C*H_targ*W_targ, 1)
  
-    #     d_A_flat = xp.zeros(num_channels * num_pixels_in, dtype=d_Z.dtype) # (N*C*H_src*W_src, 1)
-    #     d_Z_flat = d_Z.reshape(num_channels, num_pixels_out) # (N*C, H_targ*W_targ)
+        d_A_flat = xp.zeros(num_channels * num_pixels_in, dtype=d_Z.dtype) # (N*C*H_src*W_src, 1)
+        d_Z_flat = d_Z.reshape(num_channels, num_pixels_out) # (N*C, H_targ*W_targ)
         
-    #     val_tl = (d_Z_flat * self.w_tl).flatten() # (N*C*H_targ*W_targ, 1)
-    #     val_tr = (d_Z_flat * self.w_tr).flatten() # (N*C*H_targ*W_targ, 1)
-    #     val_bl = (d_Z_flat * self.w_bl).flatten() # (N*C*H_targ*W_targ, 1)
-    #     val_br = (d_Z_flat * self.w_br).flatten() # (N*C*H_targ*W_targ, 1)
+        val_tl = (d_Z_flat * self.w_tl).flatten() # (N*C*H_targ*W_targ, 1)
+        val_tr = (d_Z_flat * self.w_tr).flatten() # (N*C*H_targ*W_targ, 1)
+        val_bl = (d_Z_flat * self.w_bl).flatten() # (N*C*H_targ*W_targ, 1)
+        val_br = (d_Z_flat * self.w_br).flatten() # (N*C*H_targ*W_targ, 1)
         
-    #     xp.add.at(d_A_flat, self.idx_tl, val_tl)
-    #     xp.add.at(d_A_flat, self.idx_tr, val_tr)
-    #     xp.add.at(d_A_flat, self.idx_bl, val_bl)
-    #     xp.add.at(d_A_flat, self.idx_br, val_br)
+        xp.add.at(d_A_flat, self.idx_tl, val_tl)
+        xp.add.at(d_A_flat, self.idx_tr, val_tr)
+        xp.add.at(d_A_flat, self.idx_bl, val_bl)
+        xp.add.at(d_A_flat, self.idx_br, val_br)
         
-    #     d_A = d_A_flat.reshape(N, C, H_src, W_src)
-    #     return d_A
+        d_A = d_A_flat.reshape(N, C, H_src, W_src)
+        return d_A
 
     def get_config(self): # 可以不保存索引, 压缩大小
         return {

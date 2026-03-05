@@ -68,17 +68,68 @@ else:
         xp = np
         cp = None
 
-def to_cpu(x):
-    """Move array to CPU (NumPy)"""
-    if x is None: return None
-    if xp == np: return x
-    return cp.asnumpy(x)
+# def to_cpu(x):
+#     """Move array to CPU (NumPy)"""
+#     if x is None: return None
+#     if xp == np: return x
+#     return cp.asnumpy(x)
 
-def to_gpu(x):
-    """Move array to GPU (CuPy)"""
-    if x is None: return None
-    if xp == np: return x
-    return cp.asarray(x)
+# def to_gpu(x):
+#     """Move array to GPU (CuPy)"""
+#     if x is None: return None
+#     if xp == np: return x
+#     return cp.asarray(x)
+
+
+def to_gpu(array, dtype=None, copy=True):
+    """
+    安全的将数组转移到GPU
+    确保返回纯净的CuPy数组
+    """
+    if array is None:
+        return None
+    
+    # 如果已经是CuPy数组
+    if isinstance(array, cp.ndarray):
+        if copy:
+            return array.copy()  # 创建副本避免共享内存
+        return array
+    
+    # 如果是NumPy数组
+    if isinstance(array, np.ndarray):
+        # 确保使用正确的数据类型
+        if dtype is not None:
+            array = array.astype(dtype)
+        # 使用cp.asarray创建新的CuPy数组
+        return cp.asarray(array)
+    
+    # 如果是其他类型（如list），先转NumPy再转CuPy
+    return cp.asarray(np.asarray(array), dtype=dtype)
+
+def to_cpu(array, dtype=None, copy=True):
+    """
+    安全的将数组转移到CPU
+    确保返回纯净的NumPy数组
+    """
+    if array is None:
+        return None
+    
+    # 如果是NumPy数组
+    if isinstance(array, np.ndarray):
+        if copy:
+            return array.copy()
+        return array
+    
+    # 如果是CuPy数组
+    if isinstance(array, cp.ndarray):
+        # 使用get()获取NumPy数组
+        cpu_array = array.get()
+        if dtype is not None:
+            cpu_array = cpu_array.astype(dtype)
+        return cpu_array
+    
+    # 如果是其他类型
+    return np.asarray(array, dtype=dtype)
 # ===========================================================
 
 
@@ -92,6 +143,9 @@ def img2col(X:xp.ndarray, filter_size:int, stride:int = 1, padding:tuple[int,int
     return (N,h_out,w_out,C,filter_size,filter_size)
     '''
     N,C,H,W = X.shape # C == filter_c
+
+#----------------------------强制复制到gpu确保数组不是混杂numpy，保证pad和asstride能正常使用-----------------------------------#
+    X = cp.array(X, copy=True)  # 强制复制到GPU，确保不共享内存
     
     # Handle both old format (p_h, p_w) and new format (p_H1, p_H2, p_W1, p_W2)
     if len(padding) == 2:
@@ -113,13 +167,17 @@ def img2col(X:xp.ndarray, filter_size:int, stride:int = 1, padding:tuple[int,int
     # Apply asymmetric padding
     if p_H1 > 0 or p_H2 > 0 or p_W1 > 0 or p_W2 > 0:
         # Use NumPy for padding to avoid CuPy compatibility issues
-        if isinstance(X, np.ndarray):
-            X_paded = np.pad(X, [(0,0), (0,0), (p_H1, p_H2), (p_W1, p_W2)], mode='constant')
+        # if isinstance(X, np.ndarray):
+        #     X_paded = np.pad(X, [(0,0), (0,0), (p_H1, p_H2), (p_W1, p_W2)], mode='constant')
+        # else:
+        #     # For CuPy arrays, move to CPU, pad, then move back
+        #     X_cpu = X.get()
+        #     X_paded_cpu = np.pad(X_cpu, [(0,0), (0,0), (p_H1, p_H2), (p_W1, p_W2)], mode='constant')
+        #     X_paded = to_gpu(X_paded_cpu)
+        if hasattr(xp, 'pad'):
+            X_paded = xp.pad(X, [(0,0), (0,0), (p_H1, p_H2), (p_W1, p_W2)], mode='constant', constant_values=0)
         else:
-            # For CuPy arrays, move to CPU, pad, then move back
-            X_cpu = X.get()
-            X_paded_cpu = np.pad(X_cpu, [(0,0), (0,0), (p_H1, p_H2), (p_W1, p_W2)], mode='constant')
-            X_paded = xp.asarray(X_paded_cpu)
+            print("Warning: xp does not have pad function, falling back to CPU padding")
     else:
         X_paded = X
 
@@ -160,16 +218,16 @@ def img2col(X:xp.ndarray, filter_size:int, stride:int = 1, padding:tuple[int,int
                         f"last_w_idx={last_w_idx} >= W_padded={W_padded}")
     
 
-    
     try:
         # Use NumPy's as_strided for compatibility, then convert back to CuPy if needed
-        if isinstance(X_paded, np.ndarray):
-            X_out = np.lib.stride_tricks.as_strided(X_paded, shape=new_shape, strides=new_strides)
-        else:
-            # For CuPy arrays, use NumPy as_strided on CPU then transfer back
-            X_paded_cpu = X_paded.get()
-            X_out_cpu = np.lib.stride_tricks.as_strided(X_paded_cpu, shape=new_shape, strides=new_strides)
-            X_out = xp.asarray(X_out_cpu)
+        # if isinstance(X_paded, np.ndarray):
+        #     X_out = np.lib.stride_tricks.as_strided(X_paded, shape=new_shape, strides=new_strides)
+        # else:
+        #     # For CuPy arrays, use NumPy as_strided on CPU then transfer back
+        #     X_paded_cpu = X_paded.get()
+        #     X_out_cpu = np.lib.stride_tricks.as_strided(X_paded_cpu, shape=new_shape, strides=new_strides)
+        #     X_out = xp.asarray(X_out_cpu)
+        X_out = as_strided(X_paded, shape=new_shape, strides=new_strides)
     except Exception as e:
         raise
     return X_out
@@ -428,19 +486,23 @@ class Conv(TrainableLayer):
         self.padding = None
         self.same_padding = same_padding
 
+    #--------tmp array, transfer to cpu--------------#
         # initialize filters and bias
-        self.F = xp.random.randn(filter_channel * filter_size * filter_size, filter_num) / xp.sqrt(filter_size * filter_size * filter_channel)
+        self.F = np.random.randn(filter_channel * filter_size * filter_size, filter_num) / np.sqrt(filter_size * filter_size * filter_channel)
             # maybe more way to initialize filters
-        self.bias = xp.zeros((1, filter_num))  # (1, f_n^{l})
+        self.bias = np.zeros((1, filter_num))  # (1, f_n^{l})
         # update everytime forward_prop is called
-        self.X_col = None
+        self.X_col = None 
+    #------------------------------------------------#
         self.col_shape = None
 
+    #--------tmp array, transfer to cpu--------------#
         # update params
-        self.S_F = xp.zeros_like(self.F)
-        self.V_F = xp.zeros_like(self.F)
-        self.S_bias = xp.zeros_like(self.bias)
-        self.V_bias = xp.zeros_like(self.bias)
+        self.S_F = np.zeros_like(self.F)
+        self.V_F = np.zeros_like(self.F)
+        self.S_bias = np.zeros_like(self.bias)
+        self.V_bias = np.zeros_like(self.bias)
+    #------------------------------------------------#
     
 
     def get_config(self):
@@ -496,11 +558,18 @@ class Conv(TrainableLayer):
         F: (f_c^{l}*f_size^{l}*f_size^{l})
         Returns: (N, f_n^{l}, Z_H^{l}, Z_W^{l})
         '''
+    #--------tmp array, transfer to gpu--------------#
+        self.F = to_gpu(self.F)
+        self.bias = to_gpu(self.bias)
+        if hasattr(self, 'X_col') and self.X_col is not None:
+            self.X_col = to_gpu(self.X_col) # X_col 只有在第一次未初始化是None
+    #------------------------------------------------#
+
+
         N,C,H,W = X.shape
         # adjust padding dynamically with flexible asymmetric padding
         if self.padding is None:
-            
-            
+  
             # 使用改进的 O(1) 算法计算 padding
             p_H1, p_H2 = calculate_dynamic_padding(H, self.filter_size, self.stride, self.same_padding)
             p_W1, p_W2 = calculate_dynamic_padding(W, self.filter_size, self.stride, self.same_padding)
@@ -524,13 +593,31 @@ class Conv(TrainableLayer):
         Z = Z.reshape(self.col_shape[0],self.col_shape[1],self.col_shape[2],self.filter_num)# (N, Z_H^{l}, Z_W^{l}, f_n^{l})
         Z = Z.transpose(0,3,1,2)# (N, f_n^{l}, Z_H^{l}, Z_W^{l})
 
+    #--------tmp array, transfer to cpu--------------#
+        self.F = to_cpu(self.F)
+        self.bias = to_cpu(self.bias)
+        self.X_col = to_cpu(self.X_col)
+    #------------------------------------------------#
         return Z
+    
+
     def backward_prop(self, d_Z:xp.ndarray)->xp.ndarray:
         '''
         d_Z: (N, f_n^{l}, Z_H^{l}, Z_W^{l}) (统一维度设计)
         F: (X_C^{l-1} * filter_size^{l} * filter_size^{l}, f_n^{l})
         Returns: (N, X_C^{l-1}, X_H^{l-1}, X_W^{l-1})
         '''
+    #--------tmp array, transfer to gpu--------------#
+        self.F = to_gpu(self.F)
+        self.bias = to_gpu(self.bias)
+        self.X_col = to_gpu(self.X_col)
+
+        self.S_F = to_gpu(self.S_F)
+        self.V_F = to_gpu(self.V_F)
+        self.S_bias = to_gpu(self.S_bias)
+        self.V_bias = to_gpu(self.V_bias)
+    #------------------------------------------------#
+
         d_Z = d_Z.transpose(0,2,3,1).reshape(-1,self.filter_num) # (N * Z_H^{l} * Z_W^{l}, f_n^{l})
         
         d_F = self.X_col.T @ d_Z # (X_C * filter_size * filter_size, f_n^{l})
@@ -550,11 +637,25 @@ class Conv(TrainableLayer):
             self.F = self.F - self.learning_rate * d_F # (X_C * filter_size * filter_size, f_n^{l})
             self.bias = self.bias - self.learning_rate * d_bias # (1,f_n^{l})  
         d_X_col = d_X_col.reshape(self.col_shape) # (N, h_out, w_out, filter_c, filter_size, filter_size)
-        d_X = col2img(d_X_col,stride=self.stride, padding=self.padding) # (N,X_C^{l-1}, X_H^{l-1}, X_W^{l-1}) 
+        d_X = col2img(d_X_col,stride=self.stride, padding=self.padding) # (N,X_C^{l-1}, X_H^{l-1}, X_W^{l-1})
+
+    #--------tmp array, transfer to cpu--------------#
+        self.F = to_cpu(self.F)
+        self.bias = to_cpu(self.bias)
+                        # self.X_col = to_cpu(self.X_col)
+        # clear X_col from memory since it's only needed during forward/backward pass and can be large
+        del self.X_col
+        cp.get_default_memory_pool().free_all_blocks()
+        # self.X_col = None
+
+        self.S_F = to_cpu(self.S_F)
+        self.V_F = to_cpu(self.V_F)
+        self.S_bias = to_cpu(self.S_bias)
+        self.V_bias = to_cpu(self.V_bias)
+    #------------------------------------------------#
         return d_X
         
         
-
 
 
 class BatchNorm(TrainableLayer):
@@ -566,25 +667,30 @@ class BatchNorm(TrainableLayer):
 
         self.input_shape = None
 
+    #--------tmp array, transfer to cpu--------------#
         # tmp params
         self.mu = None
         self.sigma = None
         self.y_hat = None
-        self.y_tilde = None
-
-        # learnable parameters
-        self.gamma = None
-        self.beta = None
+        # self.y_tilde = None 没用上
 
         # Running statistics for inference
         self.running_mean = None
         self.running_var = None
+    #------------------------------------------------#
+
         self.momentum = momentum
+
+    #--------tmp array, transfer to cpu--------------#
+        # learnable parameters
+        self.gamma = None
+        self.beta = None
 
         self.S_gamma = None
         self.V_gamma = None
         self.S_beta = None
         self.V_beta = None
+    #------------------------------------------------#
         
     def get_config(self):
         return {
@@ -632,19 +738,29 @@ class BatchNorm(TrainableLayer):
 
         
     def forward_prop(self, Z:xp.ndarray, training:bool=True)->xp.ndarray:
+
+    #--------tmp array, transfer to gpu--------------#
+    # 其实在反向传播用完就可以丢弃了，所以在这个位置应该是None的
+        # self.mu = to_gpu(self.mu)
+        # self.sigma = to_gpu(self.sigma)
+        # self.y_hat = to_gpu(self.y_hat) 
+
+        self.running_mean = to_gpu(self.running_mean)
+        self.running_var = to_gpu(self.running_var)
+        
+    #------------------------------------------------#
         
         if self.input_shape is None:
             self.input_shape = tuple([1]+list(Z.shape[1:]))
             
-            
         if self.gamma is None:
-            self.gamma = xp.ones(self.input_shape)
-            self.S_gamma = xp.zeros_like(self.gamma)
-            self.V_gamma = xp.zeros_like(self.gamma)
+            self.gamma = np.ones(self.input_shape)
+            self.S_gamma = np.zeros_like(self.gamma)
+            self.V_gamma = np.zeros_like(self.gamma)
         if self.beta is None:
-            self.beta = xp.zeros(self.input_shape)
-            self.S_beta = xp.zeros_like(self.beta)
-            self.V_beta = xp.zeros_like(self.beta)
+            self.beta = np.zeros(self.input_shape)
+            self.S_beta = np.zeros_like(self.beta)
+            self.V_beta = np.zeros_like(self.beta)
 
         # 初始化 running statistics
         if self.running_mean is None:
@@ -673,13 +789,31 @@ class BatchNorm(TrainableLayer):
             sigma = self.running_var
           
             self.y_hat = (Z - mu) / xp.sqrt(sigma + self.epsilon)# 预测时候虽然更新y_hat但是训练时会覆盖更新，不会出错
-
-       
+    
+    #--------tmp array, transfer to cpu--------------#
+        self.mu = to_cpu(self.mu)
+        self.sigma = to_cpu(self.sigma)
+        self.running_mean = to_cpu(self.running_mean)
+        self.running_var = to_cpu(self.running_var)
+        self.y_hat = to_cpu(self.y_hat)
+    #------------------------------------------------#
         y_tilde = self.gamma * self.y_hat + self.beta
       
         return y_tilde
     
     def backward_prop(self, d_y_tilde:xp.ndarray)->xp.ndarray:
+    #--------tmp array, transfer to gpu--------------#
+        self.sigma = to_gpu(self.sigma)
+        self.y_hat = to_gpu(self.y_hat)
+
+        self.gamma = to_gpu(self.gamma)
+        self.beta = to_gpu(self.beta)
+        self.S_gamma = to_gpu(self.S_gamma)
+        self.V_gamma = to_gpu(self.V_gamma)
+        self.S_beta = to_gpu(self.S_beta)
+        self.V_beta = to_gpu(self.V_beta)
+    #------------------------------------------------#
+
         # Batch dimension is always axis 0 now
         if d_y_tilde.ndim == 4:
             axis = (0, 2, 3)
@@ -704,6 +838,26 @@ class BatchNorm(TrainableLayer):
             self.beta = self.beta - self.learning_rate * d_beta
         d_Z = (self.gamma / xp.sqrt(self.sigma + self.epsilon)) * (d_y_tilde - B - D)
 
+    #--------tmp array, transfer to cpu--------------#
+                # self.sigma = to_cpu(self.sigma)
+                # self.y_hat = to_cpu(self.y_hat)
+        # 清空y_hat和sigma, mu以节省内存，因为它们在下一次forward_prop时会被覆盖更新
+        # self.mu = None
+        # self.sigma = None
+        # self.y_hat = None
+        del self.mu
+        del self.sigma
+        del self.y_hat
+        cp.get_default_memory_pool().free_all_blocks()
+
+        self.gamma = to_cpu(self.gamma)
+        self.beta = to_cpu(self.beta)
+        self.S_gamma = to_cpu(self.S_gamma)
+        self.V_gamma = to_cpu(self.V_gamma)
+        self.S_beta = to_cpu(self.S_beta)
+        self.V_beta = to_cpu(self.V_beta)
+    #------------------------------------------------#
+    
         return d_Z
 
 
@@ -741,6 +895,12 @@ class Activation(layer):
         return: (N, ...) same as Z
         
         """
+        # 临时类型检查----------------------------------------------------------------------------------------------------------------------
+        if isinstance(Z, np.ndarray):
+# ---------------------------------------不知道为什么会传入numpyarray
+            # print("Warning: Activation.forward_prop received numpy array, converting to cupy array for GPU computation")
+            Z = to_gpu(Z)
+
         self.Z = Z
         # to ensure activation function's emcapsulation, do not do reshape operation
         if self.activation == 'relu':
@@ -1224,62 +1384,6 @@ class Sampling(layer):# 放弃Upsampling, 改用宽高维度分别进行采样
 
     #     return d_A.reshape(self.src_shape)
 
-        
-    # def backward_prop(self, d_Z:xp.ndarray)->xp.ndarray:
-    #     """
-    #     版本0
-    #     d_Z: (N, C, H_targ, W_targ)
-    #     return: (N, C, H_src, W_src)
-    #     """
-    #     N, C, H_targ, W_targ = d_Z.shape
-    #     H_src, W_src = self.src_shape[2], self.src_shape[3]
-        
-    #     num_pixels_out = H_targ * W_targ
-    #     num_pixels_in = H_src * W_src
-    #     num_channels = N * C        
-    #     if (self.w_tl==None or self.w_tr==None or self.w_bl==None or self.w_br==None):
-
-    #         h_floor_flat = xp.floor(self.h_in_grid).astype(int).reshape(-1,1) # (H_targ * W_targ, 1)
-    #         w_floor_flat = xp.floor(self.w_in_grid).astype(int).reshape(-1,1) # (H_targ * W_targ, 1)
-            
-    #         h_ceil_flat = xp.minimum(h_floor_flat + 1, H_src - 1)
-    #         w_ceil_flat = xp.minimum(w_floor_flat + 1, W_src - 1)
-            
-    #         weight_h_flat = self.h_in_grid.reshape(-1,1) - h_floor_flat
-    #         weight_w_flat = self.w_in_grid.reshape(-1,1) - w_floor_flat
-
-    #         self.w_tl = (1 - weight_h_flat) * (1 - weight_w_flat) # (H_targ * W_targ, 1)
-    #         self.w_tr = weight_h_flat * (1 - weight_w_flat) # (H_targ * W_targ, 1)
-    #         self.w_bl = (1 - weight_h_flat) * weight_w_flat # (H_targ * W_targ, 1)  
-    #         self.w_br = weight_h_flat * weight_w_flat # (H_targ * W_targ, 1)
-
-    #         offset_tl = h_floor_flat * W_src + w_floor_flat # (H_targ * W_targ, 1)
-    #         offset_tr = h_floor_flat * W_src + w_ceil_flat # (H_targ * W_targ, 1)
-    #         offset_bl = h_ceil_flat * W_src + w_floor_flat # (H_targ * W_targ, 1)
-    #         offset_br = h_ceil_flat * W_src + w_ceil_flat # (H_targ * W_targ, 1)
-
-    #         channel_offsets = xp.arange(num_channels)[:, None] * num_pixels_in # (N*C, 1)
-
-    #         self.idx_tl = (channel_offsets + offset_tl).flatten() # (N*C*H_targ*W_targ, 1)
-    #         self.idx_tr = (channel_offsets + offset_tr).flatten() # (N*C*H_targ*W_targ, 1)
-    #         self.idx_bl = (channel_offsets + offset_bl).flatten() # (N*C*H_targ*W_targ, 1)
-    #         self.idx_br = (channel_offsets + offset_br).flatten() # (N*C*H_targ*W_targ, 1)
- 
-    #     d_A_flat = xp.zeros(num_channels * num_pixels_in, dtype=d_Z.dtype) # (N*C*H_src*W_src, 1)
-    #     d_Z_flat = d_Z.reshape(num_channels, num_pixels_out) # (N*C, H_targ*W_targ)
-        
-    #     val_tl = (d_Z_flat * self.w_tl).flatten() # (N*C*H_targ*W_targ, 1)
-    #     val_tr = (d_Z_flat * self.w_tr).flatten() # (N*C*H_targ*W_targ, 1)
-    #     val_bl = (d_Z_flat * self.w_bl).flatten() # (N*C*H_targ*W_targ, 1)
-    #     val_br = (d_Z_flat * self.w_br).flatten() # (N*C*H_targ*W_targ, 1)
-        
-    #     xp.add.at(d_A_flat, self.idx_tl, val_tl)
-    #     xp.add.at(d_A_flat, self.idx_tr, val_tr)
-    #     xp.add.at(d_A_flat, self.idx_bl, val_bl)
-    #     xp.add.at(d_A_flat, self.idx_br, val_br)
-        
-    #     d_A = d_A_flat.reshape(N, C, H_src, W_src)
-    #     return d_A
 
     def get_config(self): # 可以不保存索引, 压缩大小
         return {

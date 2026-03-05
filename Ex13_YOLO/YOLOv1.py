@@ -1,4 +1,4 @@
-from CNN_v4_cupy import *
+from CNN_v5_cupy import *
 
 import numpy as np
 import os
@@ -84,7 +84,7 @@ def to_gpu(x):
 
 class YOLOv1:
     def __init__(self, layers:list[layer],
-        lambda_coord:float=5.0,
+        lambda_coord:float=10.0,
         lambda_noobj:float=0.5,
         learning_rate:float=0.001,
         _Adam:bool=False,beta1:float=0.9,beta2:float=0.999,epsilon:float=1e-8,):
@@ -112,6 +112,8 @@ class YOLOv1:
         self.Indices = None
         self.start_idx = None
         self.end_idx = None
+
+        self.outputshape = None
 
         self.iou = None
 
@@ -149,6 +151,15 @@ class YOLOv1:
                 for key, val in weight.items():
                     params[f'layer_{i}_weight_{key}']=val
 
+        params['model_config'] = np.array({
+            'lambda_coord': self.lambda_coord,
+            'lambda_noobj': self.lambda_noobj,
+            'S': self.S,
+            'B': self.B,
+            'C': self.C,
+            'isInBox': to_cpu(self.isInBox),
+            'isInGrid': to_cpu(self.isInGrid),
+        },dtype=object)
 
         params['training_state'] = np.array({
             'learning_rate': self.learning_rate,    
@@ -271,26 +282,41 @@ class YOLOv1:
             
             layers.append(layer)
         
-        # Initialize CNN
-        cnn = CNN(layers=layers)
+        # Initialize YOLOv1 model
+        yolo = YOLOv1(layers=layers)
+        if 'model_config' in data:
+            try:
+                model_config = data['model_config'].item()
+                yolo.lambda_coord = model_config['lambda_coord']
+                yolo.lambda_noobj = model_config['lambda_noobj']
+                yolo.S = model_config['S']
+                yolo.B = model_config['B']
+                yolo.C = model_config['C']
+                # Convert arrays to CuPy if using GPU
+                isInBox_val = model_config['isInBox']
+                isInGrid_val = model_config['isInGrid']
+                yolo.isInBox = to_gpu(isInBox_val) if xp != np else isInBox_val
+                yolo.isInGrid = to_gpu(isInGrid_val) if xp != np else isInGrid_val
+            except Exception as e:
+                print(f"Warning: Could not load model config: {e}")
 
         # Restore global training state if available
         if 'training_state' in data:
             try:
                 state_val = data['training_state'].item()
 
-                cnn.learning_rate = state_val['learning_rate']
-                cnn.epoch_start = state_val['epoch_start']
-                cnn.cost_history = state_val['cost_history']
-                print(f"Resuming training from epoch {cnn.epoch_start} with LR={cnn.learning_rate}")
+                yolo.learning_rate = state_val['learning_rate']
+                yolo.epoch_start = state_val['epoch_start']
+                yolo.cost_history = state_val['cost_history']
+                print(f"Resuming training from epoch {yolo.epoch_start} with LR={yolo.learning_rate}")
             except Exception as e:
                 print(f"Warning: Could not load training state: {e}")
         
         # 4. Synchronize hyperparameters (learning rate, etc.) to all layers
-        cnn.unified_hyperparam(learning_rate=cnn.learning_rate)
+        yolo.unified_hyperparam(learning_rate=yolo.learning_rate)
 
         print("Model loaded successfully.")
-        return cnn
+        return yolo
 
     def unified_hyperparam(self, learning_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
@@ -345,7 +371,11 @@ class YOLOv1:
         return iou 
     
     def Loss(self, Y:xp.ndarray)->float:
-        out_tmp = self.out.reshape(Y.shape)
+        """
+        Y: (N_batch, S[0], S[1], (B*5+C))
+        """
+        self.outputshape = Y.shape
+        out_tmp = self.out.reshape(self.outputshape)
         # IoU per grid cell (broadcast to all B boxes)
         self.iou = self.IoU(out_tmp[..., :4], Y[..., :4])        # (N_batch, S_w, S_h)
         self.iou = self.iou[..., None]                            # (N_batch, S_w, S_h, 1)
@@ -479,14 +509,14 @@ class YOLOv1:
                     batch_cost = self.Loss(Y_batch)
                     nnn = num_batches // 5
                     if print_cost and batch_cost and batch_idx % nnn == 0:
-                        print(f"Epoch {i + self.epoch_start}/{self.epoch_start + epochs} Batch {batch_idx}/{num_batches}  cost: {batch_cost:.6f}")
+                        print(f"Epoch {i + self.epoch_start}/{self.epoch_start + epochs} Batch {batch_idx}/{num_batches}  cost: {batch_cost/batch_size_actual:.6f}")
                     epoch_cost += batch_cost
                     
                     self.backward(Y_batch)
                 
                 # Average cost for the epoch
                 if num_batches > 0:
-                    epoch_cost /= num_batches
+                    epoch_cost /= N
                     # 将 CuPy 标量安全地转到 CPU，并存成 Python float，避免 np.array 直接接收 CuPy 对象
                     epoch_cost_cpu = float(to_cpu(epoch_cost))
                     # 始终把 cost_history 当作 Python list 使用，避免 numpy.ndarray 没有 append 的问题
@@ -512,18 +542,42 @@ class YOLOv1:
         except KeyboardInterrupt:
             print("\nTraining interrupted by user.")
             self.epoch_start += epoch_accumulated
+        # finally:
             if save_path:
                 print(f"Saving model to {save_path}...")
                 self.save_model(save_path)
             
-            
+            self.cost_history = np.array(self.cost_history, dtype=object)
             return to_cpu(self.cost_history)
         
-        self.epoch_start += epoch_accumulated
-        if save_path:
-            print(f"Saving model to {save_path}...")
-            self.save_model(save_path)
-        self.cost_history = np.array(self.cost_history, dtype=object)
-        return to_cpu(self.cost_history)
 
+
+    def predict(self, X:np.ndarray, batch_size:int=8)->np.ndarray:
+        X = to_gpu(X)
+        N = X.shape[0]
+
+        all_predictions = []
+        num_batches = (N + batch_size - 1) // batch_size  # 上取整
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, N)
+            X_batch = X[start_idx:end_idx]
+            actual_batch_size = end_idx - start_idx
+            
+            # Forward pass
+            predictions = self.forward(X_batch, training=False)
+            predictions = to_cpu(predictions.reshape(actual_batch_size,*self.outputshape[1:]))
+            all_predictions.append(predictions)
+        
+        # 合并所有 batch 的预测结果
+        return np.concatenate(all_predictions, axis=0)
+
+    def evaluate(self, X:np.ndarray, Y_test:np.ndarray):
+        X = to_gpu(X)
+        Y_test = to_gpu(Y_test)
+
+        self.out = to_cpu(self.predict(X))
+        loss = self.Loss(Y_test)
+        return loss
 
