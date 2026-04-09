@@ -23,7 +23,7 @@ def display_image(X:np.ndarray, Y_pred:np.ndarray, S:tuple=(10,10), B:int=2, C:i
     Boxes_H = Y_reshape[..., BoxIndices*5+3]
     Boxes_Conf = Y_reshape[..., BoxIndices*5+4]
     Boxes_Class = Y_reshape[..., B*5:]
-    thereshold = 0.7
+    thereshold = 0.2
     mask = Boxes_Conf > thereshold
     # print(Boxes_W)
     Boxes_X = Boxes_X[mask] * width
@@ -38,7 +38,7 @@ def display_image(X:np.ndarray, Y_pred:np.ndarray, S:tuple=(10,10), B:int=2, C:i
     ax = plt.gca()
 
     for x,y,w,h,conf,cls in zip(Boxes_X,Boxes_Y,Boxes_W,Boxes_H,Boxes_Conf,Boxes_Class):
-        ax.add_patch(plt.Rectangle((x-w/2, y-h/2), w, h, fill=False, edgecolor='red', linewidth=2))
+        ax.add_patch(plt.Rectangle((x-w/2, y-h/2), w, h, fill=False, edgecolor='red', linewidth=1))
         ax.text(x-w/2, y-h/2-5, f'Cls:{cls}, Conf:{conf:.2f}', bbox=dict(facecolor='red', alpha=0.5))
     plt.show()
 

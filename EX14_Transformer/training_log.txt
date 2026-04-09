@@ -1,0 +1,287 @@
+[00:14:10] ======================================================================
+[00:14:10] TRANSFORMER FROM SCRATCH: Sentiment Analysis Project
+[00:14:10] ======================================================================
+[00:14:10] 
+Version: Pure PyTorch Implementation (No External Dependencies)
+[00:14:10] Goal: Build & Train a Mini Transformer for Text Classification
+[00:14:10] 
+------------------------------------------------------------
+[00:14:10] STEP 1: Environment Check
+[00:14:10] ------------------------------------------------------------
+[00:14:10] PyTorch Version: 2.10.0+cu130
+[00:14:10] CUDA Available: True
+[00:14:10] GPU: NVIDIA GeForce RTX 5060 Ti
+[00:14:10] GPU Memory: 15.9 GB
+[00:14:10] Using Device: cuda
+[00:14:10] 
+------------------------------------------------------------
+[00:14:10] STEP 2: Building Custom Tokenizer
+[00:14:10] ------------------------------------------------------------
+[00:14:10] Generating synthetic dataset...
+[00:14:10] Building vocabulary...
+[00:14:10] [OK] Tokenizer created!
+[00:14:10]   Vocabulary size: 129
+[00:14:10]   Training samples: 2,000
+[00:14:10]   Test samples:     500
+[00:14:10] 
+Example encoding:
+[00:14:10]   Input: 'Excellent direction and superb cinematography....'
+[00:14:10]   Tokens: [2, 4, 5, 6, 7, 8, 3, 0, 0, 0]...
+[00:14:10]   Length: 32
+[00:14:10] 
+------------------------------------------------------------
+[00:14:10] STEP 3: Implementing Transformer Architecture
+[00:14:10] ------------------------------------------------------------
+[00:14:10] 
+Building model architecture:
+[00:14:10] 
+╔══════════════════════════════════════════════════════════════╗
+║              TRANSFORMER ARCHITECTURE                         ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║   Input Text                                                ║
+║       ↓                                                      ║
+║   ┌─────────────────────────────────────┐                   ║
+║   │  Token Embedding (128d)           │                   ║
+║   │  Positional Encoding                │                   ║
+║   └────────────────┬────────────────────┘                   ║
+║                    ↓                                         ║
+║   ┌─────────────────────────────────────┐                   ║
+║   │  ×2 Transformer Encoder Layers│                   ║
+║   │    ├─ Multi-Head Self-Attention      │                   ║
+║   │    │   (4 heads, d_k=32)         │                   ║
+║   │    ├─ Add & LayerNorm               │                   ║
+║   │    ├─ Feed-Forward Network           │                   ║
+║   │    │   (128 → 256 → 128)          │                   ║
+║   │    └─ Add & LayerNorm               │                   ║
+║   └────────────────┬────────────────────┘                   ║
+║                    ↓                                         ║
+║   [CLS] Token Representation                               ║
+║                    ↓                                         ║
+║   ┌─────────────────────────────────────┐                   ║
+║   │  Classification Head                │                   ║
+║   │  Linear(128→128) → ReLU → Dropout     │                   ║
+║   │  Linear(128→2)                    │                   ║
+║   └────────────────┬────────────────────┘                   ║
+║                    ↓                                         ║
+║   Output: [NEGATIVE, POSITIVE]                              ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Model Statistics:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Total Parameters:  302,338
+  Trainable Params:  302,338
+  Model Size (FP32): ~0.00 MB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[00:14:10] [OK] Model architecture built successfully!
+[00:14:10] 
+------------------------------------------------------------
+[00:14:10] STEP 4: Data Preprocessing
+[00:14:10] ------------------------------------------------------------
+[00:14:10] Preprocessing data (max_length=32, batch_size=32)...
+[00:14:10] [OK] Preprocessing complete!
+[00:14:10]   Training batches: 63
+[00:14:10]   Test batches:     16
+[00:14:10] 
+------------------------------------------------------------
+[00:14:10] STEP 5: Training Configuration
+[00:14:10] ------------------------------------------------------------
+[00:14:11] 
+Hyperparameters:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Epochs:        10
+  Batch Size:    32
+  Learning Rate: 0.0001
+  Weight Decay:  0.01
+  Optimizer:     AdamW
+  Scheduler:     StepLR (step=3, gamma=0.5)
+  Loss Function: CrossEntropyLoss
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[00:14:11] ======================================================================
+[00:14:11] STEP 6: STARTING TRAINING
+[00:14:11] ======================================================================
+[00:14:11] 
+────────────────────────────── EPOCH 1/10 ──────────────────────────────
+[00:14:11] 
+  ✓ Train | Loss: 0.6235 | Acc: 0.7035 (70.35%)
+[00:14:12]   ✓ Val   | Loss: 0.4301 | Acc: 0.9520 (95.20%)
+[00:14:12]   ★ Best model saved! (Val Acc: 0.9520)
+[00:14:12] 
+────────────────────────────── EPOCH 2/10 ──────────────────────────────
+[00:14:12] 
+  ✓ Train | Loss: 0.3094 | Acc: 0.9350 (93.50%)
+[00:14:12]   ✓ Val   | Loss: 0.0312 | Acc: 1.0000 (100.00%)
+[00:14:12]   ★ Best model saved! (Val Acc: 1.0000)
+[00:14:12] 
+────────────────────────────── EPOCH 3/10 ──────────────────────────────
+[00:14:12] 
+  ✓ Train | Loss: 0.0317 | Acc: 0.9955 (99.55%)
+[00:14:12]   ✓ Val   | Loss: 0.0021 | Acc: 1.0000 (100.00%)
+[00:14:12] 
+────────────────────────────── EPOCH 4/10 ──────────────────────────────
+[00:14:13] 
+  ✓ Train | Loss: 0.0041 | Acc: 1.0000 (100.00%)
+[00:14:13]   ✓ Val   | Loss: 0.0011 | Acc: 1.0000 (100.00%)
+[00:14:13] 
+────────────────────────────── EPOCH 5/10 ──────────────────────────────
+[00:14:13] 
+  ✓ Train | Loss: 0.0027 | Acc: 1.0000 (100.00%)
+[00:14:13]   ✓ Val   | Loss: 0.0007 | Acc: 1.0000 (100.00%)
+[00:14:13] 
+────────────────────────────── EPOCH 6/10 ──────────────────────────────
+[00:14:13] 
+  ✓ Train | Loss: 0.0027 | Acc: 0.9995 (99.95%)
+[00:14:13]   ✓ Val   | Loss: 0.0005 | Acc: 1.0000 (100.00%)
+[00:14:13] 
+────────────────────────────── EPOCH 7/10 ──────────────────────────────
+[00:14:14] 
+  ✓ Train | Loss: 0.0014 | Acc: 1.0000 (100.00%)
+[00:14:14]   ✓ Val   | Loss: 0.0004 | Acc: 1.0000 (100.00%)
+[00:14:14] 
+────────────────────────────── EPOCH 8/10 ──────────────────────────────
+[00:14:14] 
+  ✓ Train | Loss: 0.0019 | Acc: 0.9995 (99.95%)
+[00:14:14]   ✓ Val   | Loss: 0.0004 | Acc: 1.0000 (100.00%)
+[00:14:14] 
+────────────────────────────── EPOCH 9/10 ──────────────────────────────
+[00:14:14] 
+  ✓ Train | Loss: 0.0010 | Acc: 1.0000 (100.00%)
+[00:14:14]   ✓ Val   | Loss: 0.0003 | Acc: 1.0000 (100.00%)
+[00:14:14] 
+────────────────────────────── EPOCH 10/10 ──────────────────────────────
+[00:14:15] 
+  ✓ Train | Loss: 0.0008 | Acc: 1.0000 (100.00%)
+[00:14:15]   ✓ Val   | Loss: 0.0003 | Acc: 1.0000 (100.00%)
+[00:14:15] 
+======================================================================
+[00:14:15] TRAINING COMPLETED IN 0:00:03
+[00:14:15] BEST VALIDATION ACCURACY: 1.0000 (100.00%)
+[00:14:15] ======================================================================
+[00:14:15] 
+======================================================================
+[00:14:15] STEP 7: FINAL EVALUATION
+[00:14:15] ======================================================================
+[00:14:15] 
+Final Test Results:
+[00:14:15]   ┌──────────────────────────────────┐
+[00:14:15]   │  Test Loss:           0.0312       │
+[00:14:15]   │  Test Accuracy:       1.0000 (100.00%) │
+[00:14:15]   └──────────────────────────────────┘
+[00:14:15] 
+Confusion Matrix:
+[00:14:15]                   Predicted
+[00:14:15]                ┌─────────┬─────────┐
+[00:14:15]                │ NEGATIVE│ POSITIVE│
+[00:14:15]   Actual ┌───────┼─────────┼─────────┤
+[00:14:15]   NEGATIVE│     232 │       0 │
+[00:14:15]   POSITIVE│       0 │     268 │
+[00:14:15]           └───────┴─────────┴─────────┘
+[00:14:15] 
+[✓] Model saved to: ./transformer_sentiment_model/
+[00:14:15] [✓] Results saved to: ./training_results.json
+[00:14:15] 
+======================================================================
+[00:14:15] STEP 8: INFERENCE DEMONSTRATION
+[00:14:15] ======================================================================
+[00:14:15] 
+Running inference:
+
+[00:14:15] Example 1: [Positive]
+[00:14:15]   Input:  This movie was absolutely fantastic! Great acting!
+[00:14:15]   Output: NEGATIVE (conf: 0.6997)
+
+[00:14:15] Example 2: [Negative]
+[00:14:15]   Input:  Terrible film. Waste of time and money.
+[00:14:15]   Output: NEGATIVE (conf: 0.9749)
+
+[00:14:15] Example 3: [Neutral]
+[00:14:15]   Input:  It was okay, nothing special really.
+[00:14:15]   Output: POSITIVE (conf: 0.9453)
+
+[00:14:15] Example 4: [Strong Positive]
+[00:14:15]   Input:  I loved every minute of it! A masterpiece!
+[00:14:15]   Output: POSITIVE (conf: 0.8950)
+
+[00:14:15] [✓] Inference examples saved!
+[00:14:15] 
+======================================================================
+[00:14:15]  ★★★ PROJECT COMPLETE - SUMMARY ★★★ 
+[00:14:15] ======================================================================
+[00:14:15] 
+================================================================================
+       TRANSFORMER FROM SCRATCH - SENTIMENT ANALYSIS COMPLETE
+================================================================================
+
+PROJECT OVERVIEW:
+  Task: Binary Text Classification (Positive/Negative Sentiment)
+  Architecture: Custom PyTorch Transformer (Implemented from Scratch)
+  Dataset: Synthetic IMDB-style Movie Reviews
+
+HARDWARE USED:
+  GPU: NVIDIA GeForce RTX 5060 Ti
+  VRAM: 16GB (RTX 5060 Ti)
+  RAM: 32GB
+
+MODEL ARCHITECTURE:
+  Type: Encoder-only Transformer
+  Embedding Dimension: 128
+  Attention Heads: 4
+  Encoder Layers: 2
+  FFN Dimension: 256
+  Total Parameters: 302,338
+  Model Size: ~0.00 MB
+
+TRAINING DETAILS:
+  Epochs: 10
+  Batch Size: 32
+  Learning Rate: 0.0001
+  Optimizer: AdamW
+  Training Time: 0:00:03
+
+RESULTS:
+  Best Validation Accuracy: 1.0000 (100.00%)
+  Final Test Accuracy:     1.0000 (100.00%)
+
+WHAT YOU'VE LEARNED:
+  ✓ How to implement Multi-Head Self-Attention from scratch
+  ✓ How to build Transformer Encoder layers
+  ✓ How to create custom tokenizers and vocabularies
+  ✓ How to train Transformers end-to-end
+  ✓ How to perform inference on new text
+
+OUTPUT FILES:
+  • Trained Model:     ././transformer_sentiment_model/model.pt
+  • Training Log:      ./training_log.txt
+  • Results JSON:      ./training_results.json
+  • Checkpoint:        ./training_checkpoint.json
+  • Inference Examples: ./inference_examples.json
+
+STATUS: ✅ SUCCESSFULLY COMPLETED
+
+================================================================================
+
+[00:14:15] [✓] GPU memory cleared
+[00:14:15] 
+======================================================================
+[00:14:15]  ★★★ CONGRATULATIONS! YOUR TRANSFORMER PROJECT IS COMPLETE! ★★★ 
+[00:14:15] ======================================================================
+[00:14:15] 
+You have successfully built and trained a Transformer from scratch!
+
+KEY TAKEAWAYS:
+  1. Transformers use Self-Attention mechanisms to process sequences
+  2. Multi-Head Attention allows parallel attention on different subspaces
+  3. Position encodings give models awareness of token order
+  4. Layer normalization stabilizes training
+  5. Residual connections help gradient flow
+
+NEXT STEPS:
+  1. Try larger datasets for better generalization
+  2. Experiment with different hyperparameters
+  3. Add more encoder layers for deeper representations
+  4. Try pre-training on large corpora before fine-tuning
+  5. Deploy your model as a web API
+

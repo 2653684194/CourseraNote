@@ -1,0 +1,98 @@
+已有的数据：X, Y
+(967, 448, 448, 3) (967, 5)多标签任务
+X, Y, classes = load_classified_data(IMGS_DIR, LBLS_DIR, (448,448), N=3500, 
+                                     classes = [
+                                        'bicycle',  
+                                        'bus', 'car', 
+                                        # 'cat', 'cow','dog', 'horse', 
+                                        'motorbike', 'person',   
+                                     ])
+
+已有的架构（yolo浅层架构，不可修改）
+cnn = CNN(
+    layers=[
+            # ResBlock(Layers = [
+                Conv(filter_num=64,filter_size=7,filter_channel=3,stride=2),
+                # BatchNorm(),
+                Activation('leaky_relu'),
+                Pooling(pool_size=2,stride=2,pool_type='max'),
+            # ]),
+            # ResBlock(Layers = [
+                Conv(filter_num=192,filter_size=3,filter_channel=64,stride=1,same_padding=True),
+                # BatchNorm(),
+                Activation('leaky_relu'),
+                Pooling(pool_size=2,stride=2,pool_type='max'),
+            # ]),
+            
+            ResBlock(Layers = [
+                Conv(filter_num=128,filter_size=1,filter_channel=192,stride=1,same_padding=True),
+                Activation('leaky_relu'),
+                Conv(filter_num=256,filter_size=3,filter_channel=128,stride=1,same_padding=True),
+                Activation('leaky_relu'),   
+                Conv(filter_num=256,filter_size=1,filter_channel=256,stride=1,same_padding=True),    
+                Activation('leaky_relu'),
+                Conv(filter_num=512,filter_size=3,filter_channel=256,stride=1,same_padding=True),    
+                # BatchNorm(),
+                Activation('leaky_relu'),
+
+                Pooling(pool_size=2,stride=2,pool_type='max'),
+            ]),
+            # 任务头架构
+            *ai_layers
+
+    ],
+    learning_rate=0.01,
+    _Adam=True,
+)
+
+ai_layers=[
+    # ResBlock(Layers=[
+        Conv(filter_num=1024,filter_size=3,filter_channel=512,stride=1,same_padding=True),
+        BatchNorm(),Activation('leaky_relu'),
+        Pooling(pool_size=2,stride=2,pool_type='avg'),
+        FC(512),BatchNorm(),Activation('leaky_relu'),Dropout(0.3),
+        FC(256),BatchNorm(),Activation('leaky_relu'),Dropout(0.3),
+        FC(output_size=5),
+    # ]),
+    Activation('sigmoid'),
+]
+
+已有训练日志记录功能
+上述旧架构的训练日志如下：
+(967, 448, 448, 3) (967, 5)
+🚀 [Backend] Using CuPy (GPU Acceleration)
+Training with 967 samples, batch_size=32, num_batches=31
+Epoch 0/50 Batch 0/31  cost: 0.740508
+Epoch 0/50 Batch 6/31  cost: 0.921955
+Epoch 0/50 Batch 12/31  cost: 0.878710
+Epoch 0/50 Batch 18/31  cost: 0.898708
+Epoch 0/50 Batch 24/31  cost: 0.936069
+Epoch 0/50 Batch 30/31  cost: 1.126545
+Cost after epoch 0: 0.864697
+Model saved to models/yolov1_shallow.npz
+Epoch 1/50 Batch 0/31  cost: 0.983093
+Epoch 1/50 Batch 6/31  cost: 1.864468
+Epoch 1/50 Batch 12/31  cost: 1.609665
+Epoch 1/50 Batch 18/31  cost: 2.004429
+Epoch 1/50 Batch 24/31  cost: 2.056554
+Epoch 1/50 Batch 30/31  cost: 2.795100
+Cost after epoch 1: 1.924406
+Model saved to models/yolov1_shallow.npz
+Epoch 2/50 Batch 0/31  cost: 1.711603
+Epoch 2/50 Batch 6/31  cost: 2.401815
+Epoch 2/50 Batch 12/31  cost: 2.587411
+Epoch 2/50 Batch 18/31  cost: 2.126341
+Epoch 2/50 Batch 24/31  cost: 2.298758
+Epoch 2/50 Batch 30/31  cost: 2.739122
+Cost after epoch 2: 2.225147
+Model saved to models/yolov1_shallow.npz
+Epoch 3/50 Batch 0/31  cost: 2.279374
+
+任务头架构待定，优化器待定，训练参数待定
+
+步骤二：
+具有你说的功能；
+需要你完成A、B
+
+步骤三：
+不需要你的内容，只需要根据训练日志提供新的架构和参数，超参数配置

@@ -35,6 +35,7 @@ def load_data(
     imgsize:tuple[int, int],
     B:int = 2, # box number
     C:int = 1, # class number
+    shift:bool=True
 ) -> tuple[np.ndarray, np.ndarray]:
     images_path, labels_path = path
 
@@ -106,5 +107,10 @@ def load_data(
                 """
 
                 Y[i, grid_x, grid_y, B*5 + class_id] = 1.0
-    return X, Y
-                
+            # 过滤掉空白标签样本
+            if shift:
+                BoxIndices = np.arange(B).astype(int)
+                tmp = Y[..., BoxIndices*5+4].sum(axis=-1) # (S_w, S_h)
+                tmp = tmp.reshape(Y.shape[0],-1).sum(axis=-1) >= 1
+
+    return X[tmp], Y[tmp]

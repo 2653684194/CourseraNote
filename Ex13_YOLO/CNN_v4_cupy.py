@@ -379,7 +379,7 @@ class layer:
         pass
     def backward_prop(self, dY: xp.ndarray) -> xp.ndarray:
         pass
-    def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
         pass # 无参数层不需要更新超参数
     def get_config(self): return None
     def set_config(self, config:dict): pass
@@ -395,8 +395,8 @@ class TrainableLayer(layer):
         self.Adam_beta2 = Adam_beta2
         self.epsilon = epsilon
 
-    def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
-        self.learning_rate = learn_rate
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+        self.learning_rate = learning_rate
         if _Adam is not None: self._Adam = _Adam
         if beta1 is not None: self.Adam_beta1 = beta1
         if beta2 is not None: self.Adam_beta2 = beta2

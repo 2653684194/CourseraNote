@@ -1,3 +1,5 @@
+from queue import PriorityQueue
+from cupy import nan
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
 import matplotlib.pyplot as plt
@@ -68,20 +70,8 @@ else:
         xp = np
         cp = None
 
-# def to_cpu(x):
-#     """Move array to CPU (NumPy)"""
-#     if x is None: return None
-#     if xp == np: return x
-#     return cp.asnumpy(x)
 
-# def to_gpu(x):
-#     """Move array to GPU (CuPy)"""
-#     if x is None: return None
-#     if xp == np: return x
-#     return cp.asarray(x)
-
-
-def to_gpu(array, dtype=None, copy=True):
+def to_gpu(array, dtype=cp.float32, copy=True):
     """
     安全的将数组转移到GPU
     确保返回纯净的CuPy数组
@@ -106,7 +96,44 @@ def to_gpu(array, dtype=None, copy=True):
     # 如果是其他类型（如list），先转NumPy再转CuPy
     return cp.asarray(np.asarray(array), dtype=dtype)
 
-def to_cpu(array, dtype=None, copy=True):
+# def to_cpu(array, dtype=np.float32, copy=True):
+#     """
+#     安全的将数组转移到CPU
+#     确保返回纯净的NumPy数组，避免溢出和nan/inf
+#     """
+#     if array is None:
+#         return None
+#     # 如果是NumPy数组
+#     if isinstance(array, np.ndarray):
+#         arr = array.copy() if copy else array
+#         # Clip防止溢出
+#         if np.issubdtype(dtype, np.integer):
+#             arr = np.clip(arr, np.iinfo(dtype).min, np.iinfo(dtype).max)
+#         elif np.issubdtype(dtype, np.floating):
+#             arr = np.clip(arr, -1e10, 1e10)
+#         arr = arr.astype(dtype)
+#         # nan/inf处理
+#         arr = np.nan_to_num(arr, nan=0.0, posinf=1e10, neginf=-1e10)
+#         return arr
+#     # 如果是CuPy数组
+#     if isinstance(array, cp.ndarray):
+#         cpu_array = array.get()
+#         # Clip防止溢出
+#         if np.issubdtype(dtype, np.integer):
+#             cpu_array = np.clip(cpu_array, np.iinfo(dtype).min, np.iinfo(dtype).max)
+#         elif np.issubdtype(dtype, np.floating):
+#             cpu_array = np.clip(cpu_array, -1e10, 1e10)
+#         cpu_array = cpu_array.astype(dtype)
+#         # nan/inf处理
+#         cpu_array = np.nan_to_num(cpu_array, nan=0.0, posinf=1e10, neginf=-1e10)
+#         return cpu_array
+#     # 其他类型
+#     arr = np.asarray(array, dtype=dtype)
+#     arr = np.nan_to_num(arr, nan=0.0, posinf=1e10, neginf=-1e10)
+#     return arr
+# ===========================================================
+# old version
+def to_cpu(array, dtype=np.float32, copy=True):# float32 by default
     """
     安全的将数组转移到CPU
     确保返回纯净的NumPy数组
@@ -130,7 +157,59 @@ def to_cpu(array, dtype=None, copy=True):
     
     # 如果是其他类型
     return np.asarray(array, dtype=dtype)
-# ===========================================================
+# # ===========================================================
+
+
+class GPUBufferPool:
+    """
+    动态 GPU 缓冲池：按 shape 复用显存，减少频繁分配/释放导致的显存锯齿（一上一下）。
+    使用方式：buf = pool.get(shape, dtype) -> 用完后 pool.release(buf)。
+    """
+    def __init__(self, max_buffers_per_shape=4):
+        self._pool = {}  # (shape, dtype) -> list of cp.ndarray
+        self._max_per_shape = max(1, max_buffers_per_shape)
+
+    def get(self, shape, dtype=None):
+        if cp is None:
+            return None
+        dtype = dtype or cp.float32
+        key = (tuple(shape), dtype)
+        if key in self._pool and self._pool[key]:
+            return self._pool[key].pop()
+        return cp.empty(shape, dtype=dtype)
+
+    def release(self, buf):
+        if cp is None or buf is None or not isinstance(buf, cp.ndarray):
+            return
+        key = (tuple(buf.shape), buf.dtype)
+        if key not in self._pool:
+            self._pool[key] = []
+        if len(self._pool[key]) < self._max_per_shape:
+            self._pool[key].append(buf)
+
+    def clear(self):
+        """清空池中缓冲，便于显存回收（如 epoch 结束或 OOM 前）。"""
+        self._pool.clear()
+
+
+# 全局 GPU 缓冲池，Conv 等层复用
+_gpu_buffer_pool = GPUBufferPool(max_buffers_per_shape=4) if cp is not None else None
+
+
+def interrupt():
+    path = 'AAA_Interrupt_assist.txt'
+    if not os.path.exists(path):
+        return 0
+    with open(path, 'r') as f:
+        line = f.readline().strip()
+        if line.startswith("Interrupt:"):
+            try:
+                return int(line.split(":")[1].strip()) == 1
+            except ValueError:
+                return 0
+    # path = 'interrupt.txt'
+    # if os.path.exists(path):
+    #     return 1
 
 
 def img2col(X:xp.ndarray, filter_size:int, stride:int = 1, padding:tuple[int,int,int,int]=(0,0,0,0), dilation:int = 1)->xp.ndarray:
@@ -289,6 +368,43 @@ def col2img(X_col:xp.ndarray, stride:int=1, padding:tuple=(0,0,0,0))->xp.ndarray
         return X_padded
 
 
+def col2img_uniform(
+    values: xp.ndarray,
+    stride: int,
+    padding: tuple,
+    filter_size: int,
+) -> xp.ndarray:
+    '''
+    Scatter uniform gradient for avg-pooling backward without allocating (n, filter_size^2).
+    values: (N, h_out, w_out, C) - one value per output position, to be divided by filter_size^2
+      and added to each of the filter_size^2 input positions.
+    Returns: (N, C, H, W) where H,W are the unpadded spatial size.
+    '''
+    N, h_out, w_out, C = values.shape
+    if len(padding) == 2:
+        p_H1 = p_H2 = padding[0]
+        p_W1 = p_W2 = padding[1]
+    else:
+        p_H1, p_H2, p_W1, p_W2 = padding
+    H = (h_out - 1) * stride - p_H1 - p_H2 + filter_size
+    W = (w_out - 1) * stride - p_W1 - p_W2 + filter_size
+    H_padded = H + p_H1 + p_H2
+    W_padded = W + p_W1 + p_W2
+    scale = 1.0 / (filter_size * filter_size)
+    vals = values * scale  # (N, h_out, w_out, C)
+    X_padded = xp.zeros((N, C, H_padded, W_padded), dtype=vals.dtype)
+    for fh in range(filter_size):
+        for fw in range(filter_size):
+            h_start = fh
+            h_end = fh + h_out * stride
+            w_start = fw
+            w_end = fw + w_out * stride
+            X_padded[:, :, h_start:h_end:stride, w_start:w_end:stride] += vals.transpose(0, 3, 1, 2)
+    if p_H1 > 0 or p_H2 > 0 or p_W1 > 0 or p_W2 > 0:
+        return X_padded[:, :, p_H1:p_H1+H, p_W1:p_W1+W]
+    return X_padded
+
+
 def calculate_dynamic_padding(input_size: int, filter_size: int, stride: int, 
                               same_padding: bool = False) -> tuple[int, int]:
     """
@@ -406,7 +522,7 @@ def calculate_dynamic_padding(input_size: int, filter_size: int, stride: int,
         #     # Calculate same padding: output size = input size
         #     # (H + p_H1 + p_H2 - filter_size) // stride + 1 = H
         #     # => H + p_H1 + p_H2 - filter_size = (H - 1) * stride
-        #     # => p_H1 + p_H2 = (H - 1) * stride + filter_size - H
+        #     # => p_H1 + p_H2 = (H - 1) * self.stride + self.filter_size - H
         #     total_p_h_same = (H - 1) * self.stride + self.filter_size - H
         #     if total_p_h_same >= 0 and (H + total_p_h_same - self.filter_size) // self.stride + 1 > 0:
         #         if total_p_h_same % 2 == 0:
@@ -432,12 +548,13 @@ def calculate_dynamic_padding(input_size: int, filter_size: int, stride: int,
         # # ========== 旧的 padding 计算代码结束 ==========
 
 
+
 class layer:
     def forward_prop(self, X: xp.ndarray, training:bool=True) -> xp.ndarray:
         pass
     def backward_prop(self, dY: xp.ndarray) -> xp.ndarray:
         pass
-    def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
         pass # 无参数层不需要更新超参数
     def get_config(self): return None
     def set_config(self, config:dict): pass
@@ -453,8 +570,8 @@ class TrainableLayer(layer):
         self.Adam_beta2 = Adam_beta2
         self.epsilon = epsilon
 
-    def modified_hyperparam(self, learn_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
-        self.learning_rate = learn_rate
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+        self.learning_rate = learning_rate
         if _Adam is not None: self._Adam = _Adam
         if beta1 is not None: self.Adam_beta1 = beta1
         if beta2 is not None: self.Adam_beta2 = beta2
@@ -575,9 +692,16 @@ class Conv(TrainableLayer):
             p_W1, p_W2 = calculate_dynamic_padding(W, self.filter_size, self.stride, self.same_padding)
             self.padding = (p_H1, p_H2, p_W1, p_W2)
         
-        self.X_col = img2col(X,filter_size=self.filter_size,stride=self.stride,padding=self.padding)
-        self.col_shape = self.X_col.shape # 每次forward_prop都要更新col_shape
-        self.X_col = self.X_col.reshape(self.col_shape[0]*self.col_shape[1]*self.col_shape[2],-1) # (N * h_out * w_out, X_C^{l-1} * filter_size^{l} * filter_size^{l})
+        X_col_tmp = img2col(X,filter_size=self.filter_size,stride=self.stride,padding=self.padding)
+        self.col_shape = X_col_tmp.shape # 每次forward_prop都要更新col_shape
+        shape_flat = (self.col_shape[0]*self.col_shape[1]*self.col_shape[2], -1)
+        X_col_flat = X_col_tmp.reshape(shape_flat) # (N * h_out * w_out, X_C^{l-1} * filter_size * filter_size)
+        # 缓冲池：复用 GPU 缓冲，避免每轮 to_cpu/to_gpu 导致显存锯齿（用实际 shape，不能用 -1）
+        if _gpu_buffer_pool is not None:
+            self.X_col = _gpu_buffer_pool.get(X_col_flat.shape, dtype=X_col_flat.dtype)
+            cp.copyto(self.X_col, X_col_flat)
+        else:
+            self.X_col = X_col_flat
 
         # Debug/validation: ensure matmul inner dimensions match
         if self.X_col.shape[1] != self.F.shape[0]:
@@ -596,7 +720,9 @@ class Conv(TrainableLayer):
     #--------tmp array, transfer to cpu--------------#
         self.F = to_cpu(self.F)
         self.bias = to_cpu(self.bias)
-        self.X_col = to_cpu(self.X_col)
+        # X_col 留在 GPU 由缓冲池管理，不再 to_cpu，减少显存上下波动
+        if _gpu_buffer_pool is None and hasattr(self, 'X_col') and self.X_col is not None:
+            self.X_col = to_cpu(self.X_col)
     #------------------------------------------------#
         return Z
     
@@ -608,22 +734,33 @@ class Conv(TrainableLayer):
         Returns: (N, X_C^{l-1}, X_H^{l-1}, X_W^{l-1})
         '''
     #--------tmp array, transfer to gpu--------------#
+        if not hasattr(self, 'X_col') or self.X_col is None:
+            raise ValueError(
+                "Conv.backward_prop: X_col missing. Call forward_prop before backward_prop, "
+                "and ensure this Conv layer is not reused in the same backward pass."
+            )
         self.F = to_gpu(self.F)
         self.bias = to_gpu(self.bias)
-        self.X_col = to_gpu(self.X_col)
-
-        self.S_F = to_gpu(self.S_F)
-        self.V_F = to_gpu(self.V_F)
-        self.S_bias = to_gpu(self.S_bias)
-        self.V_bias = to_gpu(self.V_bias)
+        if _gpu_buffer_pool is None or not isinstance(self.X_col, cp.ndarray):
+            self.X_col = to_gpu(self.X_col)
+        # 使用缓冲池时 X_col 已在 GPU，无需 to_gpu
+        if self._Adam:
+            self.S_F = to_gpu(self.S_F)
+            self.V_F = to_gpu(self.V_F)
+            self.S_bias = to_gpu(self.S_bias)
+            self.V_bias = to_gpu(self.V_bias)
     #------------------------------------------------#
 
         d_Z = d_Z.transpose(0,2,3,1).reshape(-1,self.filter_num) # (N * Z_H^{l} * Z_W^{l}, f_n^{l})
         
         d_F = self.X_col.T @ d_Z # (X_C * filter_size * filter_size, f_n^{l})
         d_bias = d_Z.sum(axis=0,keepdims=True).reshape(1,-1) # (1,f_n^{l})
-        # d_F = xp.clip(d_F, -10, 10)
-        # d_bias = xp.clip(d_bias, -10, 10)
+        
+        d_F = xp.clip(d_F, -5.0, 5.0)
+        d_bias = xp.clip(d_bias, -5.0, 5.0)
+        if xp.any(xp.isnan(d_F)) or xp.any(xp.isnan(d_bias)):
+            print("gradient explosion happend in Conv")
+
         d_X_col = d_Z @ self.F.T # (N * Z_H^{l} * Z_W^{l}, X_C * filter_size * filter_size)
         # calculating gradient must be earlier than updating params
         if self._Adam:
@@ -642,16 +779,20 @@ class Conv(TrainableLayer):
     #--------tmp array, transfer to cpu--------------#
         self.F = to_cpu(self.F)
         self.bias = to_cpu(self.bias)
-                        # self.X_col = to_cpu(self.X_col)
-        # clear X_col from memory since it's only needed during forward/backward pass and can be large
-        del self.X_col
-        cp.get_default_memory_pool().free_all_blocks()
-        # self.X_col = None
-
-        self.S_F = to_cpu(self.S_F)
-        self.V_F = to_cpu(self.V_F)
-        self.S_bias = to_cpu(self.S_bias)
-        self.V_bias = to_cpu(self.V_bias)
+        # 缓冲池：归还 X_col 到池中复用，不再 del，减轻显存锯齿
+        if _gpu_buffer_pool is not None and self.X_col is not None:
+            _gpu_buffer_pool.release(self.X_col)
+            self.X_col = None
+        else:
+            if hasattr(self, 'X_col'):
+                del self.X_col
+        if cp is not None:
+            cp.get_default_memory_pool().free_all_blocks()
+        if self._Adam:
+            self.S_F = to_cpu(self.S_F)
+            self.V_F = to_cpu(self.V_F)
+            self.S_bias = to_cpu(self.S_bias)
+            self.V_bias = to_cpu(self.V_bias)
     #------------------------------------------------#
         return d_X
         
@@ -747,6 +888,10 @@ class BatchNorm(TrainableLayer):
 
         self.running_mean = to_gpu(self.running_mean)
         self.running_var = to_gpu(self.running_var)
+        if hasattr(self, 'gamma') and self.gamma is not None:
+            self.gamma = to_gpu(self.gamma)
+        if hasattr(self, 'beta') and self.beta is not None:
+            self.beta = to_gpu(self.beta)
         
     #------------------------------------------------#
         
@@ -754,11 +899,11 @@ class BatchNorm(TrainableLayer):
             self.input_shape = tuple([1]+list(Z.shape[1:]))
             
         if self.gamma is None:
-            self.gamma = np.ones(self.input_shape)
+            self.gamma = xp.ones(self.input_shape)
             self.S_gamma = np.zeros_like(self.gamma)
             self.V_gamma = np.zeros_like(self.gamma)
         if self.beta is None:
-            self.beta = np.zeros(self.input_shape)
+            self.beta = xp.zeros(self.input_shape)
             self.S_beta = np.zeros_like(self.beta)
             self.V_beta = np.zeros_like(self.beta)
 
@@ -789,16 +934,18 @@ class BatchNorm(TrainableLayer):
             sigma = self.running_var
           
             self.y_hat = (Z - mu) / xp.sqrt(sigma + self.epsilon)# 预测时候虽然更新y_hat但是训练时会覆盖更新，不会出错
-    
+        
+        y_tilde = self.gamma * self.y_hat + self.beta    
     #--------tmp array, transfer to cpu--------------#
-        self.mu = to_cpu(self.mu)
-        self.sigma = to_cpu(self.sigma)
+        if training:
+            self.mu = to_cpu(self.mu)
+            self.sigma = to_cpu(self.sigma)
         self.running_mean = to_cpu(self.running_mean)
         self.running_var = to_cpu(self.running_var)
         self.y_hat = to_cpu(self.y_hat)
+        self.gamma = to_cpu(self.gamma)
+        self.beta = to_cpu(self.beta)
     #------------------------------------------------#
-        y_tilde = self.gamma * self.y_hat + self.beta
-      
         return y_tilde
     
     def backward_prop(self, d_y_tilde:xp.ndarray)->xp.ndarray:
@@ -808,10 +955,11 @@ class BatchNorm(TrainableLayer):
 
         self.gamma = to_gpu(self.gamma)
         self.beta = to_gpu(self.beta)
-        self.S_gamma = to_gpu(self.S_gamma)
-        self.V_gamma = to_gpu(self.V_gamma)
-        self.S_beta = to_gpu(self.S_beta)
-        self.V_beta = to_gpu(self.V_beta)
+        if self._Adam:
+            self.S_gamma = to_gpu(self.S_gamma)
+            self.V_gamma = to_gpu(self.V_gamma)
+            self.S_beta = to_gpu(self.S_beta)
+            self.V_beta = to_gpu(self.V_beta)
     #------------------------------------------------#
 
         # Batch dimension is always axis 0 now
@@ -834,6 +982,11 @@ class BatchNorm(TrainableLayer):
             self.S_beta = self.Adam_beta2 * self.S_beta + (1-self.Adam_beta2) * xp.power(d_beta,2)
             self.beta = self.beta - self.learning_rate * self.V_beta / (xp.sqrt(self.S_beta) + self.epsilon)
         else:
+            # Gradient Clipping for simple SGD
+            d_gamma = xp.clip(d_gamma, -5.0, 5.0)
+            d_beta = xp.clip(d_beta, -5.0, 5.0)
+            if xp.any(xp.isnan(d_gamma)) or xp.any(xp.isnan(d_beta)) :
+                print("gradient explosion happend in Batchnorm")
             self.gamma = self.gamma - self.learning_rate * d_gamma
             self.beta = self.beta - self.learning_rate * d_beta
         d_Z = (self.gamma / xp.sqrt(self.sigma + self.epsilon)) * (d_y_tilde - B - D)
@@ -849,15 +1002,14 @@ class BatchNorm(TrainableLayer):
         del self.sigma
         del self.y_hat
         cp.get_default_memory_pool().free_all_blocks()
-
         self.gamma = to_cpu(self.gamma)
         self.beta = to_cpu(self.beta)
-        self.S_gamma = to_cpu(self.S_gamma)
-        self.V_gamma = to_cpu(self.V_gamma)
-        self.S_beta = to_cpu(self.S_beta)
-        self.V_beta = to_cpu(self.V_beta)
+        if self._Adam:
+            self.S_gamma = to_cpu(self.S_gamma)
+            self.V_gamma = to_cpu(self.V_gamma)
+            self.S_beta = to_cpu(self.S_beta)
+            self.V_beta = to_cpu(self.V_beta)
     #------------------------------------------------#
-    
         return d_Z
 
 
@@ -884,7 +1036,8 @@ class Activation(layer):
     @staticmethod
     def sigmoid(X:xp.ndarray)->xp.ndarray:
         # Numerically stable sigmoid
-        X = X.clip(-100, 100)
+        if xp.any(xp.any(xp.isnan(X))):
+            print("gradient explosion detection in sigmoid (NaN in input)")
         return xp.where(X >= 0,
                        1 / (1 + xp.exp(-X)),
                        xp.exp(X) / (1 + xp.exp(X)))
@@ -893,8 +1046,14 @@ class Activation(layer):
         """
         Z: (N, ...)
         return: (N, ...) same as Z
-        
         """
+    #--------tmp array, transfer to gpu--------------#
+        if hasattr(self, 'Map') and self.Map is not None:
+            self.Map = to_gpu(self.Map)
+        if hasattr(self, 'Indice') and self.Indice is not None:
+            self.Indice = to_gpu(self.Indice)
+    #------------------------------------------------#
+
         # 临时类型检查----------------------------------------------------------------------------------------------------------------------
         if isinstance(Z, np.ndarray):
 # ---------------------------------------不知道为什么会传入numpyarray
@@ -905,11 +1064,21 @@ class Activation(layer):
         # to ensure activation function's emcapsulation, do not do reshape operation
         if self.activation == 'relu':
             self.Map = Z > 0
-            return Z * self.Map
+            out = Z * self.Map
+            self.Z = to_cpu(self.Z) # 只保存输入Z到CPU，节省内存
+            self.Map = to_cpu(self.Map) # 只保存bool类型的Map到CPU，节省内存
+            return out
+            # return Z * self.Map
         elif self.activation == 'leaky_relu':
-            return xp.where(Z > 0, Z, 0.01 * Z)
+            out = xp.where(Z > 0, Z, 0.01 * Z)
+            # self.Z = to_cpu(self.Z) # 只保存输入Z到CPU，节省内存
+            return out
+            # return xp.where(Z > 0, Z, 0.01 * Z)
         elif self.activation == 'sigmoid':
-            return self.sigmoid(Z)
+            out = self.sigmoid(Z)
+            # self.Z = to_cpu(self.Z) # 只保存输入Z到CPU，节省内存
+            return out
+            # return self.sigmoid(Z)  
         elif self.activation == 'softmax':
             if len(Z.shape) != 2: # (N, D_out)
                 raise ValueError('FC layer softmax only support 2D input')
@@ -917,7 +1086,15 @@ class Activation(layer):
             # 对于空间注意力，通常在H*W维度进行softmax
             exp_X = xp.exp(Z - xp.max(Z, axis=1, keepdims=True)) # 数值稳定版本
             self.Indice = exp_X / xp.sum(exp_X, axis=1, keepdims=True)
-            return self.Indice
+            self.Z = to_cpu(self.Z) # 只保存输入Z到CPU，节省内存
+            self.Indice = to_cpu(self.Indice) # 只保存softmax输出的概率分布到CPU，节省内存
+            return to_gpu(self.Indice)
+            # return self.Indice
+        elif self.activation == 'tanh':
+            out = xp.tanh(Z)
+            # self.Z = to_cpu(self.Z) # 只保存输入Z到CPU，节省内存
+            return out
+            # return xp.tanh(Z)
         else:
             raise ValueError('activation must be relu or sigmoid or softmax')
     def backward_prop(self, d_A:xp.ndarray)->xp.ndarray:
@@ -925,21 +1102,35 @@ class Activation(layer):
         d_A: (N, ...) same as Z
         return: (N, ...) same as Z
         """
+    #--------tmp array, transfer to gpu--------------#
+        if hasattr(self, 'Z') and self.Z is not None:
+            self.Z = to_gpu(self.Z)
+        if hasattr(self, 'Map') and self.Map is not None:
+            self.Map = to_gpu(self.Map)
+        if hasattr(self, 'Indice') and self.Indice is not None:
+            self.Indice = to_gpu(self.Indice)
+    #------------------------------------------------#
 
         if self.activation == 'relu':
             d_Z = d_A * self.Map
+            del self.Map # 反向传播用完就丢弃，节省内存
         elif self.activation == 'leaky_relu':
             d_Z = xp.where(self.Z > 0, d_A, 0.01 * d_A)
         elif self.activation == 'sigmoid':
             sigmoid_z = self.sigmoid(self.Z)
             d_Z = sigmoid_z * (1 - sigmoid_z) * d_A
         elif self.activation == 'softmax':
-            d_Z = (self.Indice - d_A) / self.Z.shape[0] # y_hat-y_onehot
+            d_Z = (self.Indice - d_A) / self.Z.shape[0] # y_hat-y_onehot / N
             # d_Z = (self.Indice - d_A) # y_hat-y_onehot
+            del self.Indice # 反向传播用完就丢弃，节省内存
+        elif self.activation == 'tanh':
+            d_Z = (1 - xp.tanh(self.Z)**2) * d_A
         else:
             raise ValueError('activation must be relu or sigmoid')
-
-       
+    #--------tmp array, transfer to cpu--------------#  
+        del self.Z
+        cp.get_default_memory_pool().free_all_blocks()
+    #------------------------------------------------#
         return d_Z
 
 
@@ -953,7 +1144,7 @@ class Pooling(layer):# check
         self.same_padding = same_padding
 
         self.onehot = None
-        self.A_col = None
+        # self.A_col = None
 
     def get_config(self):
         return {
@@ -1026,7 +1217,7 @@ class Pooling(layer):# check
     
 
         return X  # (N, f_n, h_out, w_out)
-    def backward_prop(self,d_X:xp.ndarray)->xp.ndarray:
+    def backward_prop_old(self,d_X:xp.ndarray)->xp.ndarray:
         """
         d_X: (N, f_n^{l}, h_out, w_out)(统一维度设计)
         Returns: (N, f_n^{l}, H, W)
@@ -1052,10 +1243,38 @@ class Pooling(layer):# check
         d_A = col2img(d_A_col,stride=self.stride, padding=self.padding) # (N*f_n, 1, H, W)   
         
         return d_A.reshape(N, f_n, d_A.shape[2], d_A.shape[3]) # (N, f_n, H, W)  
+    def backward_prop(self,d_X:xp.ndarray)->xp.ndarray:
+        """
+        d_X: (N, f_n^{l}, h_out, w_out)(统一维度设计)
+        Returns: (N, f_n^{l}, H, W)
+        """
+
+        N, f_n, h_out, w_out = d_X.shape
+        pool_window_size = self.pool_size * self.pool_size
+
+        if self.pool_type == 'max' and self.onehot is not None:
+            d_X_flat = d_X.reshape(-1, 1)
+            d_A_col_flat = self.onehot * d_X_flat
+            d_A_col = d_A_col_flat.reshape(N*f_n, h_out, w_out, 1, self.pool_size, self.pool_size)
+            d_A = col2img(d_A_col, stride=self.stride, padding=self.padding)
+        elif self.pool_type == 'avg':
+            # avg pooling: gradient is uniform over window, use memory-efficient path
+            # (N, f_n, h_out, w_out) -> (N*f_n, h_out, w_out, 1) then col2img_uniform
+            d_X_4d = d_X.reshape(N * f_n, h_out, w_out, 1)
+            d_A = col2img_uniform(
+                d_X_4d,
+                stride=self.stride,
+                padding=self.padding,
+                filter_size=self.pool_size,
+            )
+        else:
+            raise TypeError(f"Unsupported pool_type: {self.pool_type}")
+        
+        return d_A.reshape(N, f_n, d_A.shape[2], d_A.shape[3]) # (N, f_n, H, W)
         
         
 
-
+# 不知道为什么FC无法tocpu优化内存
 class FC(layer): # fully connected layer
     def __init__(self,output_size,
                 _Adam = 0, Adam_beta1=0.9, Adam_beta2=0.999, epsilon=1e-8,
@@ -1065,18 +1284,24 @@ class FC(layer): # fully connected layer
         self.input_size = None # default None, will be set in forward_prop
         self.output_size = output_size
 
+    #--------tmp array, transfer to cpu--------------#  
         self.A = None
         self.shape = None
 
         self.W = None
         # bias shape (1, output_size) to broadcast with (output_size, N)
+        # self.b = np.zeros((1, output_size))
         self.b = xp.zeros((1, output_size))
+
 
 
         self.S_W = None  # Will be initialized when W is created
         self.V_W = None
-        self.S_b = xp.zeros_like(self.b)
-        self.V_b = xp.zeros_like(self.b)
+        # self.S_b = np.zeros_like(self.b) if _Adam else None
+        # self.V_b = np.zeros_like(self.b) if _Adam else None
+        self.S_b = xp.zeros_like(self.b) if _Adam else None
+        self.V_b = xp.zeros_like(self.b) if _Adam else None
+    #------------------------------------------------#
 
     def get_config(self):
         return {
@@ -1115,7 +1340,6 @@ class FC(layer): # fully connected layer
 
 
 
-
     def modified_hyperparam(self, learning_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
         self.learning_rate = learning_rate
@@ -1133,6 +1357,13 @@ class FC(layer): # fully connected layer
         W: (D_in, D_out)
         return Z: (N, D_out)
         """
+    #--------tmp array, transfer to gpu--------------#  
+        # if hasattr(self, 'W') and self.W is not None:
+        #     self.W = to_gpu(self.W)
+        # if hasattr(self, 'b') and self.b is not None:
+        #     self.b = to_gpu(self.b)
+    #------------------------------------------------#
+
         self.shape = A.shape # (N, f_n^{l}, X_H^{l}, X_W^{l}) or (N, D_out_prev)
         if len(A.shape) == 4: # (N, C, H, W)
             # Flatten the input to (N, D_in)
@@ -1145,20 +1376,51 @@ class FC(layer): # fully connected layer
         if self.W is None:
             self.input_size = self.A.shape[1]
             self.W = xp.random.randn(self.input_size,self.output_size) * xp.sqrt(2/self.input_size)
+        if self._Adam:
+            # self.S_W = np.zeros_like(self.W)
+            # self.V_W = np.zeros_like(self.W)
             self.S_W = xp.zeros_like(self.W)
-            self.V_W = xp.zeros_like(self.W)    
+            self.V_W = xp.zeros_like(self.W)
 
         Z = self.A @ self.W + self.b # (N, D_out)
+    #--------tmp array, transfer to cpu--------------#  
+        # self.A = to_cpu(self.A)
+        # self.W = to_cpu(self.W)
+        # self.b = to_cpu(self.b)
+
+        # if self._Adam:
+        #     self.S_W = to_cpu(self.S_W)
+        #     self.V_W = to_cpu(self.V_W)
+        #     self.S_b = to_cpu(self.S_b)
+        #     self.V_b = to_cpu(self.V_b)
+    #------------------------------------------------#
         return Z
+    
+
     def backward_prop(self,d_Z:xp.ndarray)->xp.ndarray:
         """
         d_Z: (N, D_out)
         return: (N, f_n^{l}, X_H^{l}, X_W^{l}) or (N, D_out_prev) same as A
         """
+    #--------tmp array, transfer to gpu--------------#  
+        # self.A = to_gpu(self.A)
+        # self.W = to_gpu(self.W)
+        # self.b = to_gpu(self.b)
+        # if self._Adam:
+        #     self.S_W = to_gpu(self.S_W)
+        #     self.V_W = to_gpu(self.V_W)
+        #     self.S_b = to_gpu(self.S_b)
+        #     self.V_b = to_gpu(self.V_b)
+    #------------------------------------------------#
+
         d_W = self.A.T @ d_Z # (D_in, D_out)
         d_b = xp.sum(d_Z,axis=0,keepdims=True) # (1, D_out)
-        # d_W = xp.clip(d_W, -10, 10)
-        # d_b = xp.clip(d_b, -10, 10)
+        
+        d_W = xp.clip(d_W, -5.0, 5.0)
+        d_b = xp.clip(d_b, -5.0, 5.0)
+        if xp.any(xp.isnan(d_W)) or xp.any(xp.isnan(d_b)):
+            print("gradient expolsion happend in FC")
+        
         d_A = d_Z @ self.W.T  # (N, D_in)
         d_A = d_A.reshape(self.shape) # (N, C, H, W) or (N, D_out_prev)
         if self._Adam:
@@ -1171,6 +1433,18 @@ class FC(layer): # fully connected layer
         else:
             self.W = self.W - self.learning_rate * d_W # (D_in, D_out)
             self.b = self.b - self.learning_rate * d_b # (1, D_out)
+
+    #--------tmp array, transfer to cpu--------------#  
+        # self.W = to_cpu(self.W)
+        # self.b = to_cpu(self.b)
+        # del self.A
+        # cp.get_default_memory_pool().free_all_blocks()
+        # if self._Adam:
+        #     self.S_W = to_cpu(self.S_W)
+        #     self.V_W = to_cpu(self.V_W)
+        #     self.S_b = to_cpu(self.S_b)
+        #     self.V_b = to_cpu(self.V_b)
+    #------------------------------------------------#
         return d_A # (N, f_n^{l}, X_H^{l}, X_W^{l})
 
 
@@ -1404,14 +1678,15 @@ class Sampling(layer):# 放弃Upsampling, 改用宽高维度分别进行采样
 # 1*1卷积要实现宽高维度放大的，可以使用转置卷积（但容易产生棋盘格伪影），现代的方法是插值法
 class ResBlock(TrainableLayer):
     def __init__(self, Layers:list[layer], connected_layer:int = None,
+                 src_shape:tuple=None, target_shape:tuple=None,
                 learning_rate:float=0.001,
                 _Adam:bool=False,Adam_beta1:float=0.9,Adam_beta2:float=0.999,epsilon:float=1e-8):
         TrainableLayer.__init__(self, learning_rate=learning_rate, _Adam=_Adam, Adam_beta1=Adam_beta1, Adam_beta2=Adam_beta2, epsilon=epsilon)
         self.Layers = Layers
         self.connected_layer = connected_layer if connected_layer is not None else len(Layers)-1
-        
-        self.src_shape = None
-        self.target_shape = None
+
+        self.src_shape = src_shape
+        self.target_shape = target_shape # 在setweight中使用，防止参数不对应
 
         self.FC_proj = None # 用于FC层间残差的高效实现
         self.Sampling_proj = None
@@ -1474,10 +1749,22 @@ class ResBlock(TrainableLayer):
                 elif len(self.src_shape) == 4 and len(self.target_shape) == 2: # Conv -> FC
                     if self.FC_proj is None:
                         self.FC_proj = FC(output_size = targ_size,_Adam = self._Adam, Adam_beta1 = self.Adam_beta1, Adam_beta2 = self.Adam_beta2, epsilon = self.epsilon, learning_rate = self.learning_rate)
+                    # out2 = self.FC_proj.forward_prop(X)
+                    # print(out.shape,out2.shape,flush=True)
                     out += self.FC_proj.forward_prop(X)
                 else:
                     raise ValueError(f"Unsupported target shape: {self.target_shape}")
         return out
+
+    def modified_hyperparam(self, learning_rate=None, _Adam=None, beta1=None, beta2=None, epsilon=None):
+        """Propagate hyperparams to inner layers so global LR updates take effect."""
+        TrainableLayer.modified_hyperparam(self, learning_rate=self.learning_rate, _Adam=self._Adam, beta1=self.Adam_beta1, beta2=self.Adam_beta2, epsilon=self.epsilon)
+        for L in self.Layers:
+            L.modified_hyperparam(self.learning_rate, self._Adam, self.Adam_beta1, self.Adam_beta2, self.epsilon)
+        for proj in (self.Conv_proj, self.FC_proj):
+            if proj is not None:
+                proj.modified_hyperparam(self.learning_rate, self._Adam, self.Adam_beta1, self.Adam_beta2, self.epsilon)
+
     def backward_prop(self,d_Z:xp.ndarray)->xp.ndarray:
         connected_dZ = None
         # targ_size = 1
@@ -1519,12 +1806,15 @@ class ResBlock(TrainableLayer):
             '_Adam': self._Adam,
             'Adam_beta1': self.Adam_beta1,
             'Adam_beta2': self.Adam_beta2,
-            'epsilon': self.epsilon
+            'epsilon': self.epsilon,
+            
+            'src_shape': self.src_shape,
+            'target_shape': self.target_shape,
 
         }
     def get_weights(self):
         return {
-            'up_sampling_proj': self.Sampling_proj.get_weights() if self.Sampling_proj is not None else None,
+            'sampling_proj': self.Sampling_proj.get_weights() if self.Sampling_proj is not None else None,
             'conv_proj': self.Conv_proj.get_weights() if self.Conv_proj is not None else None,
             'fc_proj': self.FC_proj.get_weights() if self.FC_proj is not None else None,
             'Layers': [layer.get_weights() for layer in self.Layers]
@@ -1541,30 +1831,44 @@ class ResBlock(TrainableLayer):
         self.Adam_beta1 = config['Adam_beta1']
         self.Adam_beta2 = config['Adam_beta2']
         self.epsilon = config['epsilon']
+
+        self.src_shape = config['src_shape']
+        self.target_shape = config['target_shape']
         
     def set_weights(self, weights:dict):
-        if weights.get('up_sampling_proj') is not None and self.Sampling_proj is not None:
-            self.Sampling_proj.set_weights(weights['up_sampling_proj'])
-        if weights.get('conv_proj') is not None and self.Conv_proj is not None:
+        if weights.get('sampling_proj') is not None:
+            self.Sampling_proj = Sampling(self.target_shape) # 需要先创建实例才能调用set_weights
+            self.Sampling_proj.set_weights(weights['sampling_proj'])
+        if weights.get('conv_proj') is not None:
+            self.Conv_proj = Conv(filter_num = self.target_shape[1],
+                                   filter_size = 1, filter_channel = self.src_shape[1], 
+                                   stride = 1, same_padding = True, _Adam = self._Adam, 
+                                   Adam_beta1 = self.Adam_beta1, Adam_beta2 = self.Adam_beta2, 
+                                   epsilon = self.epsilon, learning_rate = self.learning_rate)
             self.Conv_proj.set_weights(weights['conv_proj'])
-        if weights.get('fc_proj') is not None and self.FC_proj is not None:
+        if weights.get('fc_proj') is not None:
+            self.FC_proj = FC(output_size = self.target_shape[1],
+                              _Adam = self._Adam, Adam_beta1 = self.Adam_beta1, Adam_beta2 = self.Adam_beta2, 
+                              epsilon = self.epsilon, learning_rate = self.learning_rate)
             self.FC_proj.set_weights(weights['fc_proj'])
         
         # 兼容旧版本可能直接传list的情况，或者字典里没有Layers的情况
-        layers_weights = weights.get('Layers')
-        if layers_weights is None and isinstance(weights, list):
-             layers_weights = weights # 极其罕见的旧兼容
-        
+        # layers_weights = weights.get('Layers')
+        # if layers_weights is None and isinstance(weights, list):
+        #     layers_weights = weights # 极其罕见的旧兼容
+        layers_weights = weights['Layers']
         if layers_weights is not None:
             for layer, weight in zip(self.Layers, layers_weights):
                 layer.set_weights(weight)
+        else:
+            print("Warning: No layer weights found in ResBlock weights. Skipping layer weights loading.")
 
 
     
 class CNN:
     def __init__(self,layers:list[layer],
                 learning_rate:float=0.001,
-                _Adam:bool=False,beta1:float=0.9,beta2:float=0.999,epsilon:float=1e-8):
+                _Adam:bool=False,Adam_beta1:float=0.9,Adam_beta2:float=0.999,epsilon:float=1e-8):
         self.layers = layers
         self.out = None
 
@@ -1572,12 +1876,20 @@ class CNN:
 
         self.learning_rate = learning_rate
         self._Adam = _Adam
-        self.Adam_beta1 = beta1
-        self.Adam_beta2 = beta2
+        self.Adam_beta1 = Adam_beta1
+        self.Adam_beta2 = Adam_beta2
         self.epsilon = epsilon
 
         self.cost_history = []
         self.epoch_start = 0
+
+        self.FP = 1.43 # rate to control gradient of False Positive in multilabel task
+        self.FN = 2-self.FP
+
+        self.alpha = 0.005
+        self.avg_rate = 0.986
+        self.beta = (1 - self.avg_rate ** 2 + self.alpha) / (1 + self.alpha)
+        print(self.beta)
 
 
     def save_model(self, filepath):
@@ -1604,7 +1916,7 @@ class CNN:
         # Save training state as object
         params['training_state'] = np.array({
             'learning_rate': self.learning_rate,
-            'epoch_start': self.epoch_start,
+            'epoch_start': len(self.cost_history),
             'cost_history': np.array(self.cost_history, dtype=object)
         }, dtype=object)
 
@@ -1653,25 +1965,25 @@ class CNN:
                 return None
         
         # Pre-process data keys to avoid O(N*M) complexity
-        # Group data by layer index and type (weights/hyperparam)
+        # Group data by layer index and type (weights)
         layer_data = {}
         for key in data.files:
-            # key format: layer_{i}_weights_{name} or layer_{i}_hyperparam_{name}
+            # key format: layer_{i}_weights_{name} 
             if not key.startswith('layer_'):
                 continue
                 
             parts = key.split('_')
-            if len(parts) < 4: continue # Not a weight/hyperparam key
+            if len(parts) < 4: continue # Not a weight key
             
             try:
                 layer_idx = int(parts[1])
-                data_type = parts[2] # 'weights' or 'hyperparam'
+                data_type = parts[2] # 'weights'
                 param_name = "_".join(parts[3:]) # handle names with underscores if any
                 
                 if layer_idx not in layer_data:
-                    layer_data[layer_idx] = {'weights': {}, 'hyperparam': {}}
+                    layer_data[layer_idx] = {'weights': {}}
                 
-                if data_type in ['weights', 'hyperparam']:
+                if data_type in ['weights']:
                     val = data[key]
                     # Handle 0-D object arrays (common when saving lists/dicts with numpy)
                     if val.ndim == 0 and val.dtype == 'O':
@@ -1713,13 +2025,11 @@ class CNN:
             layer = _create_layer(config)
             if layer is None: continue
             
-            # Efficiently restore weights and hyperparam state
+            # Efficiently restore weights  state
             if i in layer_data:
                 if layer_data[i]['weights']:
                     layer.set_weights(layer_data[i]['weights'])
                 
-                if layer_data[i]['hyperparam']:
-                    layer.set_hyperparams(layer_data[i]['hyperparam'])
             
             layers.append(layer)
         
@@ -1784,9 +2094,12 @@ class CNN:
             return to_cpu(self.out)
         else:
             return self.out
-    
-    def calculate_cost(self, Y:xp.ndarray)->float:
-        """Calculate cross-entropy cost"""
+
+    def calculate_cost(self, Y:xp.ndarray, transfer_onehot:bool=False)->float:
+        """
+        Calculate cross-entropy cost
+        这里的输出是单类loss输出，实际上不能处理多类label，但是loss不影响训练，暂时做出让步
+        """
         A_out = self.out
         # Handle different output shapes
         if len(A_out.shape) == 4:  # (N, C, H, W)
@@ -1794,15 +2107,37 @@ class CNN:
         elif len(A_out.shape) == 2 and A_out.shape[0] != Y.shape[0]:  # (N, D_out)
             if A_out.shape[0] != Y.shape[0] and A_out.shape[1] == Y.shape[0]:
                 A_out = A_out.T
-        # Calculate cost
-        Y_flat = Y.flatten()
-        # Clip to prevent log(0)
         A_out = to_cpu(A_out)
-        Y_flat = to_cpu(Y_flat)
-
+        # Clip to prevent log(0)
         A_out = np.clip(A_out, 1e-15, 1.0 - 1e-15)
-        cost = -np.mean(np.log(A_out[np.arange(Y_flat.shape[0]), Y_flat]))
+        if transfer_onehot:
+            # Calculate cost
+            Y_flat = Y.flatten()
+            Y_flat = to_cpu(Y_flat)
+            cost = -np.mean(np.log(A_out[np.arange(Y_flat.shape[0]), Y_flat.astype(int)]))
+        else:
+            Y_flat = to_cpu(Y)
+            cost = -np.mean(np.log(A_out[Y_flat.astype(int)]) * self.FN + (1 - A_out[1 - Y_flat.astype(int)]) * self.FP)
+        # print(f"A_out shape: {A_out.shape}, Y_flat shape: {Y_flat.shape}")
+        # cost = -np.mean(np.log(A_out[np.arange(Y_flat.shape[0]), Y_flat.astype(int)]))
         return cost
+    
+    def calculate_cost_multilabel(self, Y:xp.ndarray)->float:
+        # A_out, Y_flat: shape (batch_size, num_classes)
+        # Avoid log(0) by clipping
+        # A_out = to_cpu(self.out)
+        # Y_tmp = to_cpu(Y)
+        A_out = xp.clip(self.out, 1e-7, 1.0 - 1e-7)
+        # Binary cross-entropy for each class
+        # print("calculate cost",flush=True)
+        cost = -xp.mean(Y * xp.log(A_out) + (1 - Y) * xp.log(1 - A_out))
+        
+        if xp.any(xp.isnan(cost)):
+            print("Warning: Cost is NaN! Gradients might be exploding.")
+            return float('nan')
+            
+        # print("get out",flush=True)
+        return to_cpu(cost)
     
     def backward(self,dY:xp.ndarray):
         for i in range(self.len-1,-1,-1):
@@ -1811,22 +2146,34 @@ class CNN:
             #      continue
             dY = self.layers[i].backward_prop(dY)
     
-    def train(self,X:xp.ndarray,Y:xp.ndarray,epochs:int=1000,batch_size:int=32,tolerance:float=1e-6,print_cost:bool=True, save_path:str=None):
-        X = to_gpu(X)
-        Y = to_gpu(Y)
+    def train(self,X:xp.ndarray,Y:xp.ndarray,
+              epochs:int=1000,batch_size:int=32,
+              tolerance:float=1e-6,print_cost:bool=True, 
+              loss:str='single', multilabel:bool=True,save_path:str=None, min_epochs_before_converge:int=10):
+        
+        # Keep data on CPU initially to save GPU memory and avoid "AlreadyMapped" errors
+        # If input is already on GPU, it stays on GPU. If on CPU, it stays on CPU.
+        # X = to_gpu(X) 
+        # Y = to_gpu(Y)
+        
         N = X.shape[0]
         # num_batches = N // batch_size + 1  # 这个计算有误，当batch_size整除N时，会多算一个batch
         num_batches = (N + batch_size - 1) // batch_size  # 修正计算方式
         
         print(f"Training with {N} samples, batch_size={batch_size}, num_batches={num_batches}")
-        epoch_accumulated = 0
+
 
         # self.cost_history = self.cost_history.tolist()
         try:
             for i in range(epochs):
-                epoch_accumulated += 1
+
                 # Shuffle data at the beginning of each epoch
-                indices = xp.random.permutation(N)
+                # Use appropriate random generator based on array type
+                if isinstance(X, np.ndarray):
+                    indices = np.random.permutation(N)
+                else:
+                    indices = xp.random.permutation(N)
+                    
                 X_shuffled = X[indices]
                 Y_shuffled = Y[indices]
                 
@@ -1834,11 +2181,21 @@ class CNN:
                 
                 # Process in batches
                 for batch_idx in range(num_batches):
+    #----------------文件外终止，软操作-----------------------------------------------------------------
+                    if interrupt():
+                        print("Training interrupted.")
+                        if save_path:
+                            print(f"Saving model to {save_path}...")
+                            self.save_model(save_path)
+                        self.cost_history = np.array(self.cost_history, dtype=object)
+                        return to_cpu(self.cost_history)
+
                     start_idx = batch_idx * batch_size
                     end_idx = min(start_idx + batch_size, N)
                     
-                    X_batch = X_shuffled[start_idx:end_idx]
-                    Y_batch = Y_shuffled[start_idx:end_idx]
+                    # Slice first, then move to GPU
+                    X_batch = to_gpu(X_shuffled[start_idx:end_idx])
+                    Y_batch = to_gpu(Y_shuffled[start_idx:end_idx])
                     batch_size_actual = end_idx - start_idx
                     
                     # Clear the params
@@ -1847,11 +2204,15 @@ class CNN:
                     # Forward pass
                     self.forward(X_batch)
                     
+                    batch_cost = 0
                     # Calculate cost for this batch
-                    batch_cost = self.calculate_cost(Y_batch)
-                    nnn = num_batches // 5
-                    if print_cost and batch_cost and batch_idx %nnn == 0:
-                        print(f"Epoch {i + self.epoch_start}/{self.epoch_start + epochs} Batch {batch_idx}/{num_batches}  cost: {epoch_cost/self.end_idx:.6f}")
+                    if loss == 'binary':
+                        batch_cost = self.calculate_cost_multilabel(Y_batch)
+                    else:
+                        batch_cost = self.calculate_cost(Y_batch, multilabel)
+                    nnn = num_batches // 7
+                    if print_cost and batch_idx % max(1, nnn) == 0:
+                        print(f"Epoch {i + self.epoch_start}/{self.epoch_start + epochs} Batch {batch_idx}/{num_batches}  cost: {float(batch_cost):.6f}",flush=True)
                     epoch_cost += batch_cost
                     
                     # Calculate gradient for backward pass
@@ -1874,82 +2235,84 @@ class CNN:
                             num_classes = y_hat.shape[1]
                         else:
                             raise ValueError(f"Unexpected output shape: {y_hat.shape}")
-                    else:
-                        raise ValueError(f"Unexpected output shape: {y_hat.shape}")
                     
                     # Create one-hot encoding for Y_batch
-                    Y_onehot = xp.zeros((batch_size_actual, num_classes)) # (N, D_out)
-                    Y_onehot[xp.arange(batch_size_actual), Y_batch.flatten()] = 1
+                    if multilabel == 0:
+                        Y_onehot = xp.zeros((batch_size_actual, num_classes)) # (N, D_out)
+                        Y_onehot[xp.arange(batch_size_actual), Y_batch.flatten().astype(int)] = 1
     
-                    # Backward pass
-                    self.backward(Y_onehot)
+                        # Backward pass
+                        self.backward(Y_onehot)
+                    else:
+                        # Binary cross-entropy: dL/dA = (A - Y) / (A*(1-A)). FC returns (N,D_out), so no transpose.
+                        # Use per-sample gradient (no /N) so steps are visible; use lr ~1e-4 to 5e-4 for stability.
+                        y_hat_clip = xp.clip(y_hat, 1e-7, 1.0 - 1e-7)
+                        d_bce = -self.FN *Y_batch / (y_hat_clip + self.epsilon) + self.FP * (1 - Y_batch) / (1 - y_hat_clip + self.epsilon)
+                        # i strengthen the gradient of False Postive Case, targeted to handle data distribution problem
+                        d_y =( y_hat_clip - Y_batch ) / y_hat.shape[0]
+                        self.backward(d_bce)
+                    
+                    # cp.get_default_memory_pool().free_all_blocks()  # Clear GPU memory after each batch
                 
+
+
                 # Average cost for the epoch
                 if num_batches > 0:
                     epoch_cost /= num_batches
-                    
-                    self.cost_history = self.cost_history.tolist()
-                    self.cost_history.append(epoch_cost)
-                    self.cost_history = np.array(self.cost_history)
-                    # 不适用学习率震荡更新， 依赖Adam优化器， 或者用learning rate decay
-                    self.learning_rate *= 0.99
+                    # 将 CuPy 标量安全地转到 CPU，并存成 Python float
+                    epoch_cost_cpu = float(to_cpu(epoch_cost))
+                    # 学习率：仅当 cost 明确变好时略升、变差时再降；不变时不降，避免 0.99^n 把 lr 压没导致不收敛和 cost 重复
+                    min_lr, max_lr = 5e-7, 1e-1
+                    if len(self.cost_history) > 0:
+                        prev = float(self.cost_history[-1])
+                        if epoch_cost_cpu < prev:
+                            self.learning_rate = min(self.learning_rate * (1+self.alpha), max_lr)
+                        elif epoch_cost_cpu > prev:
+                            
+                            self.learning_rate = max(self.learning_rate * (1-self.beta), min_lr) # 这个数字是计算学习率的0.99期望计算得到的
+                            # 上升：1+α，下降：1-β，上升下降频率统计为五五开，对于n次epoch，[(1+α)(1-β)]^(n/2),希望学习率按照0.99 / epoch稳定下降
+                            # 于是有 1+α-β-αβ = 0.9801， 上升比下降更危险，于是我们希望预设心目中α的值，根据α计算β
+                            # 我们希望限定α、β大小合法，而β依赖于α，于是我们根据β的取值范围限制α大小：β=(α+0.0199)/(1+α)属于(0,1)
+                            # 得到α属于(-0.0199,+∞)，即(0,1)
+                        # else: 不变则 lr 不变
+                    self.learning_rate = max(min_lr, min(self.learning_rate, max_lr))
                     self.unified_hyperparam(learning_rate=self.learning_rate)
 
-                if print_cost:
-                    print(f'Cost after epoch {i}: {epoch_cost:.6f}')
+                    # 始终把 cost_history 当作 Python list 使用，避免 numpy.ndarray 没有 append 的问题
+                    if isinstance(self.cost_history, np.ndarray):
+                        self.cost_history = self.cost_history.tolist()
+                    self.cost_history.append(epoch_cost_cpu)
+
+                    if print_cost:
+                        print(f'Cost after epoch {i}: {epoch_cost:.6f}')
 
 
                 # Save model at end of epoch
-                if save_path:
+                if save_path and i % 5 == 0:
+                    print(f"Saving model to {save_path}...")
                     self.save_model(save_path)
 
-                if i > 0 and len(self.cost_history) >= 2 and abs(self.cost_history[-1] - self.cost_history[-2]) < tolerance:
-                    print(f'Converged after {i} epochs')
+
+                if (i >= min_epochs_before_converge and len(self.cost_history) >= 2 
+                    and abs(self.cost_history[-1] - self.cost_history[-2]) < tolerance):
+                    print(f'Converged after {i + 1} epochs')
                     break
+
         except KeyboardInterrupt:
             print("\nTraining interrupted by user.")
-            self.epoch_start += epoch_accumulated
+        # finally:
             if save_path:
                 print(f"Saving model to {save_path}...")
                 self.save_model(save_path)
             
-            
+            self.cost_history = np.array(self.cost_history, dtype=object)
             return to_cpu(self.cost_history)
         
-        self.epoch_start += epoch_accumulated
-        if save_path:
-            print(f"Saving model to {save_path}...")
-            self.save_model(save_path)
-        self.cost_history = np.array(self.cost_history, dtype=object)
-        return to_cpu(self.cost_history)
-        
-    def predict(self, X:np.ndarray, batch_size:int=32)->np.ndarray:
+    def predict(self, X:np.ndarray, batch_size:int=32, multilabel:bool=True)->np.ndarray:
         """Make predictions on input data with batch processing to avoid memory issues"""
         N = X.shape[0]
-        X = to_gpu(X)
+        # X = to_gpu(X) # Keep on CPU
         # # 如果样本数小于等于 batch_size，直接处理
-        # if N <= batch_size:
-        #     output = self.forward(X, training=False)
-            
-        #     # Handle different output shapes - 与训练时的逻辑保持一致
-        #     if len(output.shape) == 4:  # (N, C, H, W)
-        #         output = output.reshape(output.shape[0], -1)
-        #     elif len(output.shape) == 2:
-        #         # 使用与训练时相同的逻辑判断是否需要转置
-        #         if output.shape[1] == N:
-        #             # It's (D_out, N) = (num_classes, batch_size), transpose to (N, D_out)
-        #             output = output.T
-        #         elif output.shape[0] == N:
-        #             # Already (N, D_out) = (batch_size, num_classes)
-        #             pass  # 不需要转置
-        #         else:
-        #             # 如果都不匹配，尝试转置（兼容性处理）
-        #             if output.shape[0] != N and output.shape[1] == N:
-        #                 output = output.T
-            
-        #     output = to_cpu(output)
-        #     # Return predicted classes (argmax)
-        #     return to_cpu(np.argmax(output, axis=1).reshape(-1, 1))
         
         # 分批处理：使用列表收集所有预测结果，最后一次性拼接
         all_predictions = []  # 列表收集每个 batch 的预测结果
@@ -1958,7 +2321,9 @@ class CNN:
         for batch_idx in range(num_batches):
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + batch_size, N)
-            X_batch = X[start_idx:end_idx]
+            
+            # Move only batch to GPU
+            X_batch = to_gpu(X[start_idx:end_idx])
             batch_size_actual = end_idx - start_idx
             
             # Forward pass for this batch
@@ -1982,7 +2347,10 @@ class CNN:
             
             output = to_cpu(output)
             # Get predictions for this batch and add to list
-            batch_predictions = np.argmax(output, axis=1).reshape(-1, 1)
+            if multilabel == 0:
+                batch_predictions = np.argmax(output, axis=1).reshape(-1, 1)
+            else:
+                batch_predictions = output
             all_predictions.append(batch_predictions)
         
         # 一次性拼接所有 batch 的预测结果
@@ -2009,5 +2377,66 @@ class CNN:
 
 
 
+# debug用:检查层赋值和参数是否正确
+def compare_layer_weights(layer1:dict, layer2:dict) -> bool:
+    """
+    Compare two layers' weights.
+    """
+    if (layer1 is None and layer2 is None):
+        # print(f"Both layers have no weights.")
+        return True
+    for key1,key2 in zip(layer1.keys(), layer2.keys()):
+        if key1 != key2:
+            print(f"Weight keys differ: {key1} vs {key2}")
+            return False
+        if type(layer1[key1]) != type(layer2[key2]):
+            print(f"Weight types differ for key '{key1}': {type(layer1[key1])} vs {type(layer2[key2])}")
+            return False
+        if layer1[key1] is None and layer2[key2] is None:
+            continue
+        if isinstance(layer1[key1], list) and isinstance(layer2[key2], list):
+            if len(layer1[key1]) != len(layer2[key2]):
+                print(f"Weight list lengths differ for key '{key1}': {len(layer1[key1])} vs {len(layer2[key2])}")
+                return False
+            for i, (w1, w2) in enumerate(zip(layer1[key1], layer2[key2])):
+                if not compare_layer_weights(w1, w2):
+                    print(f"Weight list items differ at index {i} for key '{key1}'")
+                    return False
+        elif isinstance(layer1[key1], np.ndarray) and isinstance(layer2[key2], dict):
+            if not np.array_equal(layer1[key1], layer2[key2].get('weights')):
+                print(f"Weight values differ for key '{key1}': {layer1[key1]} vs {layer2[key2].get('weights')}")
+                return False
+        elif isinstance(layer1[key1], dict) and isinstance(layer2[key2], dict):
+            sublayer1=layer1[key1]
+            sublayer2=layer2[key2]
+            if not compare_layer_weights(sublayer1, sublayer2):
+                print(f"Weight sub-layers differ for key '{key1}'")
+                return False
+        elif layer1[key1].all() != layer2[key2].all():
+            print(f"Weight values differ for key '{key1}': {layer1[key1]} vs {layer2[key2]}")
+            return False
+    
+    return True
 
+def compare_layer_configs(layer1:dict, layer2:dict) -> bool:
+    """
+    Compare two layer configs.
+    """
+    if (layer1['type'] != layer2['type']):
+        print(f"Layer types differ: {layer1['type']} vs {layer2['type']}")
+        return False
+    for key1,key2 in zip(layer1.keys(), layer2.keys()):
 
+        if isinstance(layer1[key1], list) and isinstance(layer2[key2], list):
+            if len(layer1[key1]) != len(layer2[key2]):
+                print(f"Config list lengths differ for key '{key1}': {len(layer1[key1])} vs {len(layer2[key2])}")
+                return False
+            for i, (c1, c2) in enumerate(zip(layer1[key1], layer2[key2])):
+                if not compare_layer_configs(c1, c2):
+                    print(f"Config list items differ at index {i} for key '{key1}'")
+                    return False
+        elif layer1[key1] != layer2[key2]:
+            print(f"Config values differ for key '{key1}': {layer1[key1]} vs {layer2[key2]}")
+            return False
+
+    return True

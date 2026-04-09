@@ -68,48 +68,60 @@ else:
         xp = np
         cp = None
 
-def to_cpu(x):
-    """Move array to CPU (NumPy)"""
-    if x is None: return None
-    if xp == np: return x
-    return cp.asnumpy(x)
-
-def to_gpu(x):
-    """Move array to GPU (CuPy)"""
-    if x is None: return None
-    if xp == np: return x
-    return cp.asarray(x)
 # ===========================================================
+
+def interrupt():
+    path = 'AAA_Interrupt_assist.txt'
+    if not os.path.exists(path):
+        return 0
+    with open(path, 'r') as f:
+        line = f.readline().strip()
+        if line.startswith("Interrupt:"):
+            try:
+                return int(line.split(":")[1].strip()) == 1
+            except ValueError:
+                return 0
+    # path = 'interrupt.txt'
+    # if os.path.exists(path):
+    #     return 1
 
 
 class YOLOv1:
     def __init__(self, layers:list[layer],
-        lambda_coord:float=10.0,
-        lambda_noobj:float=0.5,
-        learning_rate:float=0.001,
-        _Adam:bool=False,beta1:float=0.9,beta2:float=0.999,epsilon:float=1e-8,):
+                lambda_coord:float=5.0,
+                lambda_size:float=20.0,
+                lambda_obj:float=5.0,
+                lambda_noobj:float=0.5,
+                learning_rate:float=0.01,
+                _Adam:bool=False,Adam_beta1:float=0.9,Adam_beta2:float=0.999,epsilon:float=1e-8):
         self.layers = layers
         self.out = None
         self.lambda_coord = lambda_coord
+        self.lambda_size = lambda_size
         self.lambda_noobj = lambda_noobj
+        self.lambda_obj = lambda_obj
 
         self.len = len(layers)
 
         self.learning_rate = learning_rate
         self._Adam = _Adam
-        self.beta1 = beta1
-        self.beta2 = beta2
+        self.Adam_beta1 = Adam_beta1
+        self.Adam_beta2 = Adam_beta2
         self.epsilon = epsilon
 
+        self.alpha = 0.0025
+        self.avg_rate = 0.986
+        self.beta = (1 - self.avg_rate ** 2 + self.alpha) / (1 + self.alpha)
+        print(self.beta)
+
         self.cost_history = []
-        self.accuracy_history = []
 
         # YOLO grid/box/class configuration (set later in explicit_init)
         self.B = None  # box number
         self.C = None  # class number
         self.S = None  # grid size (S_w, S_h)
 
-        self.Indices = None
+        self.indices = None
         self.start_idx = None
         self.end_idx = None
 
@@ -128,42 +140,73 @@ class YOLOv1:
         self.S = S
         self.B = B
         self.C = C
+        self.outputshape = Y.shape
 
         self.isInBox = xp.zeros((*Y.shape[:-1], B))
         self.isInGrid = xp.zeros(Y.shape[:-1])
         BoxIndices = xp.arange(B)
-        self.isInBox[..., BoxIndices] = (Y[..., BoxIndices*5+4] == xp.asarray(1.0))
+        self.isInBox[..., BoxIndices] = (Y[..., BoxIndices*5+4] > xp.asarray(0.9))
         self.isInGrid = xp.sum(self.isInBox[..., BoxIndices], axis=-1) > xp.asarray(0)
 
+        def check_in_box():
+            BoxIndices = xp.arange(self.B)
+            for i in range(Y.shape[0]):
+                have_box = False
+                for j in range(Y.shape[1]):
+                    for k in range(Y.shape[2]):
+                        if xp.sum(self.isInBox[i, j, k, BoxIndices*5+4]) > 0:
+                            have_box = True
+                if not have_box:
+                    print(f'Img {i} in images set have no label')
+            
+        check_in_box()
 
     def save_model(self, save_path:str):
         """Save the model parameters to a file."""
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-        layer_configs = [layer.get_config() for layer in self.layers]
+        # layer_configs = [layer.get_config() for layer in self.layers]
 
+        # params = {}
+        # params['layer_configs'] = np.array(layer_configs, dtype=object)
+
+        # for i,layer in enumerate(self.layers):
+        #     weight = layer.get_weights()
+        #     if weight:
+        #         params[f'layer_{i}_weights'] = weight
+        #         # for key, val in weight.items():
+        #         #     params[f'layer_{i}_weight_{key}']=val
         params = {}
-        params['layer_configs'] = np.array(layer_configs, dtype=object)
-
-        for i,layer in enumerate(self.layers):
+        for i, layer in enumerate(self.layers):
+            layer_content = {}
+            params[f'layer_{i}'] = layer_content
+            config = layer.get_config() # return dict
+            layer_content['config'] = config
             weight = layer.get_weights()
             if weight:
-                for key, val in weight.items():
-                    params[f'layer_{i}_weight_{key}']=val
+                layer_content['weights'] = weight
+
 
         params['model_config'] = np.array({
             'lambda_coord': self.lambda_coord,
+            'lambda_size': self.lambda_size,
+            'lambda_obj': self.lambda_obj,
             'lambda_noobj': self.lambda_noobj,
             'S': self.S,
             'B': self.B,
             'C': self.C,
-            'isInBox': to_cpu(self.isInBox),
-            'isInGrid': to_cpu(self.isInGrid),
+            '_Adam': self._Adam,
+            'beta1': self.Adam_beta1,
+            'beta2': self.Adam_beta2,
+            'epsilon': self.epsilon,
+            
+            # 'isInBox': to_cpu(self.isInBox),
+            # 'isInGrid': to_cpu(self.isInGrid),
         },dtype=object)
 
         params['training_state'] = np.array({
             'learning_rate': self.learning_rate,    
-            'epoch_start': self.epoch_start,
+            'epoch_start': len(self.cost_history),
             'cost_history': np.array(self.cost_history, dtype=object)
         },dtype=object)
 
@@ -189,56 +232,6 @@ class YOLOv1:
         
         # self.layers = [] # remove self usage
         layers = []
-
-        if 'layer_configs' not in data:
-            print("Error: No layer configurations found in .npz file.")
-            return None
-            
-        # Load layer configs (object array)
-        try:
-            layer_configs = data['layer_configs']
-            if layer_configs.ndim == 0:
-                layer_configs = layer_configs.item()
-            elif layer_configs.dtype == object:
-                layer_configs = layer_configs.tolist()
-        except Exception:
-            # Fallback for old models (if any)
-            try:
-                import json
-                config_str = str(data['layer_configs'][0])
-                layer_configs = json.loads(config_str)
-            except ImportError:
-                print("Error: Could not load layer_configs and json module not available.")
-                return None
-        
-        # Pre-process data keys to avoid O(N*M) complexity
-        # Group data by layer index and type (weights/hyperparam)
-        layer_data = {}
-        for key in data.files:
-            # key format: layer_{i}_weights_{name} or layer_{i}_hyperparam_{name}
-            if not key.startswith('layer_'):
-                continue
-                
-            parts = key.split('_')
-            if len(parts) < 4: continue # Not a weight/hyperparam key
-            
-            try:
-                layer_idx = int(parts[1])
-                data_type = parts[2] # 'weights' or 'hyperparam'
-                param_name = "_".join(parts[3:]) # handle names with underscores if any
-                
-                if layer_idx not in layer_data:
-                    layer_data[layer_idx] = {'weights': {}, 'hyperparam': {}}
-                
-                if data_type in ['weights', 'hyperparam']:
-                    val = data[key]
-                    # Handle 0-D object arrays (common when saving lists/dicts with numpy)
-                    if val.ndim == 0 and val.dtype == 'O':
-                        val = val.item()
-                    layer_data[layer_idx][data_type][param_name] = val
-            except ValueError:
-                continue
-
         def _create_layer(config):
             layer_type = config.pop('type')
             if layer_type == 'Conv':
@@ -268,58 +261,48 @@ class YOLOv1:
                 print(f"Unknown layer type: {layer_type}")
                 return None
 
-        for i, config in enumerate(layer_configs):
-            layer = _create_layer(config)
-            if layer is None: continue
-            
-            # Efficiently restore weights and hyperparam state
-            if i in layer_data:
-                if layer_data[i]['weights']:
-                    layer.set_weights(layer_data[i]['weights'])
-                
-                if layer_data[i]['hyperparam']:
-                    layer.set_hyperparams(layer_data[i]['hyperparam'])
-            
-            layers.append(layer)
-        
-        # Initialize YOLOv1 model
+        # 提取文件中的内容
+        for key in data.files:
+            if key.startswith('layer_'):
+                layer_data = data[key].item()
+                config = layer_data['config']
+                layer = _create_layer(config)
+                if 'weights' in layer_data:
+                    weights = layer_data['weights']
+                    layer.set_weights(weights)
+                layers.append(layer)
+            else:
+                continue
         yolo = YOLOv1(layers=layers)
-        if 'model_config' in data:
-            try:
-                model_config = data['model_config'].item()
-                yolo.lambda_coord = model_config['lambda_coord']
-                yolo.lambda_noobj = model_config['lambda_noobj']
-                yolo.S = model_config['S']
-                yolo.B = model_config['B']
-                yolo.C = model_config['C']
-                # Convert arrays to CuPy if using GPU
-                isInBox_val = model_config['isInBox']
-                isInGrid_val = model_config['isInGrid']
-                yolo.isInBox = to_gpu(isInBox_val) if xp != np else isInBox_val
-                yolo.isInGrid = to_gpu(isInGrid_val) if xp != np else isInGrid_val
-            except Exception as e:
-                print(f"Warning: Could not load model config: {e}")
+        model_config = data['model_config'].item()
+        yolo.lambda_coord = model_config['lambda_coord']
+        yolo.lambda_size = model_config['lambda_size']
+        # yolo.lambda_obj = model_config['lambda_obj']
+        yolo.lambda_noobj = model_config['lambda_noobj']
+        yolo.S = model_config['S']
+        yolo.B = model_config['B']
+        yolo.C = model_config['C']
+        yolo._Adam = model_config['_Adam']
+        yolo.Adam_beta1 = model_config['beta1']
+        yolo.Adam_beta2 = model_config['beta2']
+        yolo.epsilon = model_config['epsilon']
 
-        # Restore global training state if available
-        if 'training_state' in data:
-            try:
-                state_val = data['training_state'].item()
-
-                yolo.learning_rate = state_val['learning_rate']
-                yolo.epoch_start = state_val['epoch_start']
-                yolo.cost_history = state_val['cost_history']
-                print(f"Resuming training from epoch {yolo.epoch_start} with LR={yolo.learning_rate}")
-            except Exception as e:
-                print(f"Warning: Could not load training state: {e}")
-        
-        # 4. Synchronize hyperparameters (learning rate, etc.) to all layers
+        training_state = data['training_state'].item()
+        yolo.learning_rate = training_state['learning_rate']
+        yolo.epoch_start = training_state['epoch_start']
+        yolo.cost_history = training_state['cost_history']
         yolo.unified_hyperparam(learning_rate=yolo.learning_rate)
-
-        print("Model loaded successfully.")
+        
         return yolo
+                
 
     def unified_hyperparam(self, learning_rate:float=0.001,
             _Adam:bool=False, beta1:float=0.9, beta2:float=0.999, epsilon:float=1e-8):
+        self.learning_rate = learning_rate
+        self._Adam = _Adam
+        self.Adam_beta1 = beta1
+        self.Adam_beta2 = beta2
+        self.epsilon = epsilon
         for layer in self.layers:
             layer.modified_hyperparam(learning_rate, _Adam, beta1, beta2, epsilon)
        
@@ -391,20 +374,20 @@ class YOLOv1:
         epsilon = 1e-6
 
         CoordLoss = 0
-        CoordLoss += xp.sum((
+        CoordLoss += self.lambda_coord * xp.sum((
             xp.square(Y[..., box_indices*5]-out_tmp[..., box_indices*5]) + 
             xp.square(Y[..., box_indices*5+1]-out_tmp[..., box_indices*5+1])
-            ) * isInBox
+            )  * isInBox
         )
-        CoordLoss += xp.sum((
+        CoordLoss += self.lambda_size * xp.sum((
             xp.square(xp.sqrt(xp.clip(Y[..., box_indices*5+2], epsilon, None))-xp.sqrt(xp.clip(out_tmp[..., box_indices*5+2], epsilon, None))) + 
             xp.square(xp.sqrt(xp.clip(Y[..., box_indices*5+3], epsilon, None))-xp.sqrt(xp.clip(out_tmp[..., box_indices*5+3], epsilon, None)))
-            ) * isInBox
+            )  * isInBox
         ) 
-        CoordLoss *= self.lambda_coord  
+        # CoordLoss *= self.lambda_coord  
         
         ConfLoss = 0
-        ConfLoss += xp.sum(
+        ConfLoss += self.lambda_obj * xp.sum(
             xp.square(out_tmp[..., box_indices*5+4] - self.iou) * isInBox
         )
         ConfLoss += self.lambda_noobj * xp.sum((
@@ -418,7 +401,7 @@ class YOLOv1:
 
         total = CoordLoss + ConfLoss + ClsLoss
 
-        if xp.isnan(total) or xp.isinf(total):
+        if xp.any(xp.isnan(total)) or xp.isinf(total):
             print("CoordLoss:", float(to_cpu(CoordLoss)),
                 "ConfLoss:", float(to_cpu(ConfLoss)),
                 "ClsLoss:", float(to_cpu(ClsLoss)))
@@ -427,6 +410,9 @@ class YOLOv1:
 
 
     def backward(self, Y:xp.ndarray):
+        """
+        Y shape: (N_batch, S[0], S[1], (B*5+C))
+        """
         out_tmp = self.out.reshape(Y.shape)
         # self.iou = self.IoU(out_tmp[..., :4], Y[..., :4])
         # self.iou = self.iou[..., None]
@@ -441,25 +427,25 @@ class YOLOv1:
         # calculate dY
         BoxIndices = xp.arange(self.B)
         dY = xp.zeros_like(out_tmp)
-        dY[..., BoxIndices*5] = self.lambda_coord * 2 * (
+        dY[..., BoxIndices*5] += self.lambda_coord * 2 * (
             out_tmp[..., BoxIndices*5] - Y[..., BoxIndices*5]
             ) * isInBox
-        dY[..., BoxIndices*5+1] = self.lambda_coord * 2 * (
+        dY[..., BoxIndices*5+1] += self.lambda_coord * 2 * (
             out_tmp[..., BoxIndices*5+1] - Y[..., BoxIndices*5+1]
         ) * isInBox
-        dY[..., BoxIndices*5+2] = self.lambda_coord * ( 
+        dY[..., BoxIndices*5+2] += self.lambda_size * ( 
             1 - xp.sqrt(Y[...,BoxIndices*5+2] / (out_tmp[..., BoxIndices*5+2] + epsilon))
         ) * isInBox
-        dY[..., BoxIndices*5+3] = self.lambda_coord * (
+        dY[..., BoxIndices*5+3] += self.lambda_size * (
             1 - xp.sqrt(Y[...,BoxIndices*5+3] / (out_tmp[..., BoxIndices*5+3] + epsilon))
         ) * isInBox
-        dY[..., BoxIndices*5+4] = 2 * (
+        dY[..., BoxIndices*5+4] += self.lambda_obj * 2 * (
             out_tmp[..., BoxIndices*5+4] - self.iou
         ) * isInBox
-        dY[..., BoxIndices*5+4] = self.lambda_noobj * 2 * (
+        dY[..., BoxIndices*5+4] += self.lambda_noobj * 2 * (
             out_tmp[..., BoxIndices*5+4]
         ) * (1-isInBox)
-        dY[..., self.B*5:] = 2 * (
+        dY[..., self.B*5:] += 2 * (
             out_tmp[..., self.B*5:] - Y[..., self.B*5:]
         ) * isInGrid[..., None]
 
@@ -478,11 +464,10 @@ class YOLOv1:
         
         print(f"Training with {N} samples, batch_size={batch_size}, num_batches={num_batches}")
         epoch_accumulated = 0
-
+        
         # self.cost_history = self.cost_history.tolist()
         try:
             for i in range(epochs):
-                epoch_accumulated += 1
                 # Shuffle data at the beginning of each epoch
                 self.indices = xp.random.permutation(N)
                 X_shuffled = X[self.indices]
@@ -492,6 +477,17 @@ class YOLOv1:
                 
                 # Process in batches
                 for batch_idx in range(num_batches):
+    #----------------文件外终止，软操作-----------------------------------------------------------------
+                    if interrupt():
+                        print("Training interrupted.")
+                        self.epoch_start += epoch_accumulated
+                        if save_path:
+                            print(f"Saving model to {save_path}...")
+                            self.save_model(save_path)
+                        self.cost_history = np.array(self.cost_history, dtype=object)
+                        return to_cpu(self.cost_history)
+                    
+
                     self.start_idx = batch_idx * batch_size
                     self.end_idx = min(self.start_idx + batch_size, N)
                     
@@ -525,8 +521,18 @@ class YOLOv1:
                     self.cost_history.append(epoch_cost_cpu)
                     # 可选：如果后续需要 numpy 格式再单独转换，这里保持为 list 更安全
                     # 不适用学习率震荡更新， 依赖Adam优化器， 或者用learning rate decay
-                    self.learning_rate *= 0.99
+                    min_lr, max_lr = 5e-7, 1e-1
+                    if len(self.cost_history) > 0:
+                        prev = float(self.cost_history[-1])
+                        if epoch_cost_cpu < prev:
+                            self.learning_rate = min(self.learning_rate * (1+self.alpha), max_lr)
+                        elif epoch_cost_cpu > prev:
+                            
+                            self.learning_rate = max(self.learning_rate * (1-self.beta), min_lr)
+
                     self.unified_hyperparam(learning_rate=self.learning_rate)
+                    if len(self.cost_history) > 10 and float(self.cost_history[-10]) <= float(self.cost_history[-1]):
+                        self.learning_rate *=0.96
 
                 if print_cost:
                     print(f'Cost after epoch {i}: {epoch_cost:.6f}')
@@ -539,6 +545,8 @@ class YOLOv1:
                 if i > 0 and len(self.cost_history) >= 2 and abs(self.cost_history[-1] - self.cost_history[-2]) < tolerance:
                     print(f'Converged after {i} epochs')
                     break
+                epoch_accumulated += 1
+
         except KeyboardInterrupt:
             print("\nTraining interrupted by user.")
             self.epoch_start += epoch_accumulated

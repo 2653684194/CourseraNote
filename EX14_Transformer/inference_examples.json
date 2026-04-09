@@ -1,0 +1,30 @@
+[
+  {
+    "text": "This movie was absolutely fantastic! Great acting!",
+    "predicted_label": "NEGATIVE",
+    "confidence": 0.6997,
+    "probability_positive": 0.3003,
+    "probability_negative": 0.6997
+  },
+  {
+    "text": "Terrible film. Waste of time and money.",
+    "predicted_label": "NEGATIVE",
+    "confidence": 0.9749,
+    "probability_positive": 0.0251,
+    "probability_negative": 0.9749
+  },
+  {
+    "text": "It was okay, nothing special really.",
+    "predicted_label": "POSITIVE",
+    "confidence": 0.9453,
+    "probability_positive": 0.9453,
+    "probability_negative": 0.0547
+  },
+  {
+    "text": "I loved every minute of it! A masterpiece!",
+    "predicted_label": "POSITIVE",
+    "confidence": 0.895,
+    "probability_positive": 0.895,
+    "probability_negative": 0.105
+  }
+]

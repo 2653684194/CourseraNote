@@ -8,9 +8,9 @@ MASK_DATASET = os.path.join(os.path.dirname(__file__), "mask_dataset")
 SPLITS = ("train", "test")
 IMG_DIR = "images"
 LABEL_DIR = "labels"
-IMG_EXT = ".jpg"
+IMG_EXTS = ['.jpg', '.jpeg', '.png']
 LABEL_EXT = ".txt"
-TMP_PREFIX = "__tmp_"
+TMP_PREFIX = "__tmp_rename__"
 NEW_PREFIX = "img_"
 PAD = 6
 
@@ -23,20 +23,20 @@ def main():
             print(f"Skip {split}: dirs not found")
             continue
 
-        # 只保留同时存在图片和标签的样本，按名称排序
-        bases = []
-        for f in os.listdir(img_dir):
-            if not f.lower().endswith(IMG_EXT):
+        # 只保留同时存在图片和标签的样本，按文件名排序
+        pairs = []
+        for f in sorted(os.listdir(img_dir)):
+            if not any(f.lower().endswith(ext) for ext in IMG_EXTS):
                 continue
-            base = f[: -len(IMG_EXT)]
+            base = f.rsplit('.', 1)[0]
+            img_ext = '.' + f.rsplit('.', 1)[1].lower()
             label_path = os.path.join(label_dir, base + LABEL_EXT)
             if os.path.isfile(label_path):
-                bases.append(base)
+                pairs.append((base, img_ext))
             else:
-                print(f"  [skip] no label for image: {base}{IMG_EXT}")
+                print(f"  [skip] no label for image: {base}{img_ext}")
 
-        bases.sort()
-        n = len(bases)
+        n = len(pairs)
         if n == 0:
             print(f"{split}: no pairs found")
             continue
@@ -44,29 +44,29 @@ def main():
         print(f"{split}: renaming {n} image-label pairs to {NEW_PREFIX}XXXXXX ...")
 
         # 第一阶段：重命名为临时名，避免新名与旧名冲突
-        for i, base in enumerate(bases):
+        for i, (base, img_ext) in enumerate(pairs):
             idx = i + 1
             tmp_base = f"{TMP_PREFIX}{idx:0{PAD}d}"
-            old_img = os.path.join(img_dir, base + IMG_EXT)
+            old_img = os.path.join(img_dir, base + img_ext)
             old_label = os.path.join(label_dir, base + LABEL_EXT)
-            tmp_img = os.path.join(img_dir, tmp_base + IMG_EXT)
+            tmp_img = os.path.join(img_dir, tmp_base + img_ext)
             tmp_label = os.path.join(label_dir, tmp_base + LABEL_EXT)
             os.rename(old_img, tmp_img)
             os.rename(old_label, tmp_label)
 
         # 第二阶段：临时名改为最终名
-        for i in range(n):
+        for i, (_, img_ext) in enumerate(pairs):
             idx = i + 1
             tmp_base = f"{TMP_PREFIX}{idx:0{PAD}d}"
             new_base = f"{NEW_PREFIX}{idx:0{PAD}d}"
-            tmp_img = os.path.join(img_dir, tmp_base + IMG_EXT)
+            tmp_img = os.path.join(img_dir, tmp_base + img_ext)
             tmp_label = os.path.join(label_dir, tmp_base + LABEL_EXT)
-            new_img = os.path.join(img_dir, new_base + IMG_EXT)
+            new_img = os.path.join(img_dir, new_base + img_ext)
             new_label = os.path.join(label_dir, new_base + LABEL_EXT)
             os.rename(tmp_img, new_img)
             os.rename(tmp_label, new_label)
 
-        print(f"  -> {new_base}{IMG_EXT} (and .txt) range: {NEW_PREFIX}000001 .. {NEW_PREFIX}{n:0{PAD}d}")
+        print(f"  -> {NEW_PREFIX}000001 (and .txt) .. {NEW_PREFIX}{n:0{PAD}d}")
 
     print("Done.")
 
