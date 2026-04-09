@@ -75,6 +75,7 @@ class SimpleTokenizer:
     """Custom word-level tokenizer"""
     def __init__(self):
         self.word2idx = {'<PAD>': 0, '<UNK>': 1, '<CLS>': 2, '<SEP>': 3}
+        # Padding,Unknown,Classification,Separator
         self.idx2word = {v: k for k, v in self.word2idx.items()}
         self.vocab_size = len(self.word2idx)
 
@@ -99,16 +100,16 @@ class SimpleTokenizer:
         words = text.lower().split()
         ids = [self.word2idx['<CLS>']]
 
-        for word in words[:max_length-2]:
+        for word in words[:max_length-2]: # -2 for <CLS> and <SEP>
             ids.append(self.word2idx.get(word, self.word2idx['<UNK>']))
 
         ids.append(self.word2idx['<SEP>'])
 
         padding_length = max_length - len(ids)
         if padding_length > 0:
-            ids.extend([self.word2idx['<PAD>']] * padding_length)
+            ids.extend([self.word2idx['<PAD>']] * padding_length) # 添加len个0
 
-        attention_mask = [1] * min(len(ids), max_length)
+        attention_mask = [1] * min(len(ids), max_length) # 防御性编程，其实根据设计没什么用
         attention_mask += [0] * max(0, max_length - len(attention_mask))
 
         return {
